@@ -115,7 +115,8 @@ namespace WaterBot
 
         public class Config
         {
-            public bool UseSmallGrouping { get; set; } = false;
+            // UseSmallGrouping was removed: one planner now covers the whole farm.
+            // An old config.json that still contains it loads fine; the value is ignored.
             public bool RefillOnFinish { get; set; } = false;
             public int RefillIfLower { get; set; } = 95;
             public bool RedoPathOnRefill { get; set; } = false;
@@ -136,13 +137,6 @@ namespace WaterBot
             );
 
             // add some config options
-            configMenu.AddBoolOption(
-                mod: ModManifest,
-                name: () => this.Helper.Translation.Get("config.use_small_grouping.name"),
-                tooltip: () => this.Helper.Translation.Get("config.use_small_grouping.desc"),
-                getValue: () => config.UseSmallGrouping,
-                setValue: (bool b) => config.UseSmallGrouping = b
-            );
             configMenu.AddBoolOption(
                 mod: ModManifest,
                 name: () => this.Helper.Translation.Get("config.refill_on_finish.name"),

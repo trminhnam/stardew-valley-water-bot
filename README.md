@@ -31,11 +31,9 @@ When you **right-click** a not fully grown plant with your **Watering Can**, the
 - [Implementation](#implementation)
   1. [Trigger](#1-trigger)
   2. [Loading the Player's Farm](##2-loading-the-players-farm)
-  3. [Find Grouped Crops](#3-find-grouped-crops)
-  4. [Cost of Traveling Between Groups](#4-cost-of-traveling-between-groups)
-  5. [The Traveling Water Man](#5-the-traveling-water-man)
-  6. [Watering the Group](#6-watering-the-group)
-  7. [Out of Water!](#7-out-of-water)
+  3. [Planning the Route](#3-planning-the-route)
+  4. [Watering](#4-watering)
+  5. [Out of Water!](#5-out-of-water)
 
 # Install
 
@@ -90,52 +88,29 @@ For the image above, the tiles are colors accordingly:
 | Dark Blue  | False     | False | True  |
 | Red        | False     | True  | False |
 
-### 3. Find Grouped Crops
+### 3. Planning the Route
 
-Tiles with crops that need watering are then grouped based on adjacency using depth-first search.
+A breadth-first search from the player marks every tile the player can walk to. Every step costs the same, so this also gives the exact walking distance to each tile, going around fences, buildings and trellis crops.
 
-<img src="https://raw.githubusercontent.com/andyruwruw/stardew-valley-water-bot/main/documentation/implementation/find_groups.gif">
+The bot then plans the whole run in one pass:
 
-### 4. Cost of Traveling Between Groups
+1. From the current position, find the nearest crop that needs water, measured by walking distance to the closest tile it can be watered from (the crop's own tile or any of its 8 neighbors).
+2. Of the tiles that can water that crop, stand on the one that reaches the most remaining crops. In rows separated by a 1-tile path, that is the path, which waters up to 6 crops per stop.
+3. Queue every remaining crop in reach of that tile, once, then repeat from there.
 
-The bot then uses A* pathfinding to determine the cost of traveling from one group to another.
+Crops with no reachable tile to water them from are skipped and reported when the run ends.
 
-Each group is represented by a reachable standing tile near its centroid. A flood fill from the player identifies reachable positions, including standing places beside trellis crops.
+Planning a farm of 480 crops takes well under a tenth of a second.
 
-The cost of traveling to each group is also done from the player's current position.
+### 4. Watering
 
-<img src="https://raw.githubusercontent.com/andyruwruw/stardew-valley-water-bot/main/documentation/implementation/cost_matrix.gif">
-
-This gives us a nice cost matrix!
-
-|        | Player | Purple | Yellow | Blue |
-|--------|--------|--------|--------|------|
-| Player | -1     | 11     | 5      | 5    |
-| Purple | 11     | -1     | 6      | 8    |
-| Yellow | 5      | 6      | -1     | 6    |
-| Blue   | 5      | 8      | 6      | -1   |
-
-At this point any unreachable groups are disregarded.
-
-### 5. The Traveling Water Man
-
-We need to find the shortest path through all the groups, starting at the player's current position.
-
-The bot runs a greedy approach to solving the travelling salesman problem.
-
-The starting point is the player's position.
-
-### 6. Watering the Group
-
-For each group, the planner chooses reachable standing positions that cover nearby crops, including diagonals. Each crop is queued once, and the bot checks the live soil again before using the can so crops already watered by another player or action are skipped.
+Each crop is queued once, and the bot checks the live soil again before using the can, so crops already watered by another player or action are skipped.
 
 Watering uses the normal can effect and animation, with an explicit target tile. The bot waits for animation completion and checks the result before advancing. Failed effects are retried once; missing paths, stalled movement, and repeated tool failures stop the run with a message and details in the SMAPI log.
 
-The optional small-grouping mode builds groups around reachable watering positions instead of using side-connected crop patches. Crops without an accessible watering position are reported at the end.
+The bot never waters at 2 stamina or less, so you can't be knocked out. Walking and refilling cost no stamina.
 
-<img src="https://raw.githubusercontent.com/andyruwruw/stardew-valley-water-bot/main/documentation/implementation/fill_group.gif">
-
-### 7. Out of Water!
+### 5. Out of Water!
 
 When the watering can is low, the bot will go to the nearest source of water to refill.
 

@@ -1,4 +1,4 @@
-﻿using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework;
 using System;
 
 namespace WaterBot.Framework
@@ -13,10 +13,6 @@ namespace WaterBot.Framework
         public bool waterable;
         public int x;
         public int y;
-        public bool visited;
-        public bool watered;
-        public bool waterCheck;
-        public bool walkableCheck;
 
         public Tile(int x, int y, bool block, bool water, bool waterable)
         {
@@ -25,39 +21,6 @@ namespace WaterBot.Framework
             this.block = block;
             this.water = water;
             this.waterable = waterable;
-            this.visited = false;
-            this.watered = false;
-            this.waterCheck = false;
-            this.walkableCheck = false;
-        }
-
-        /// <summary>
-        /// Finds the Manhattan distance to another point.
-        /// </summary>
-        /// 
-        /// <param name="other"></param>
-        public int distanceTo(Tile other)
-        {
-            return Math.Abs(other.x - this.x) + Math.Abs(other.y - this.y);
-        }
-
-        /// <summary>
-        /// Finds the Manhattan distance to another point.
-        /// </summary>
-        /// 
-        /// <param name="other"></param>
-        public int distanceTo(Point other)
-        {
-            return Math.Abs(other.X - this.x) + Math.Abs(other.Y - this.y);
-        }
-
-        /// <summary>
-        /// Resets grouping data.
-        /// </summary>
-        public void reset()
-        {
-            this.visited = false;
-            this.watered = false;
         }
 
         /// <summary>

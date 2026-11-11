@@ -27,7 +27,6 @@ namespace WaterBot
         internal static Config config = new();
         public class Config
         {
-            public bool UseSmallGrouping { get; set; }
             public bool RefillOnFinish { get; set; }
             public int RefillIfLower { get; set; } = 95;
             public bool RedoPathOnRefill { get; set; }

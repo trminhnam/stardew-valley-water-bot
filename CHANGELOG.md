@@ -5,9 +5,12 @@
 - Run navigation and tool actions in the game update loop, with verified completion and bounded retries.
 - Stop safely on missing paths, stalled movement, failed animations, and planning errors.
 - Ignore stale tool callbacks after cancellation or restarting; reset on warps, day end, and return to title.
-- Choose reachable standing positions for both grouping modes, including trellises and single groups.
-- Fix map-edge grouping and finish immediately after a completion refill.
+- Choose reachable standing positions only, including beside trellis crops.
+- Fix reading past the map edge and finish immediately after a completion refill.
 - Report crops left unreachable and preserve normal harvesting when triggering the bot.
+- Never water at 2 stamina or less; walking and refilling are not limited by stamina.
+- Plan the whole farm in one pass using real walking distances: no more multi-second freezes on large farms, and about half the walking of the old default mode.
+- Remove the "Use small grouping" option; the single planner replaces both modes.
 
 # v1.2.1
 

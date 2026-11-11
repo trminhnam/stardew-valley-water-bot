@@ -20,10 +20,9 @@ namespace WaterBot.Framework
         private State state;
         public bool active => this.state != State.Idle;
         private Map map = new();
-        private List<Group> path = new();
-        private List<ActionableTile> order = new();
-        private int currentGroup;
-        private int currentTile;
+        /// <summary>The whole run's watering stops, in walking order.</summary>
+        private List<ActionableTile> stops = new();
+        private int currentStop;
         private ActionableTile? refillStation;
         private bool finishingRefill;
         private console? console;
@@ -64,7 +63,7 @@ namespace WaterBot.Framework
             this.guarded(() =>
             {
                 this.plan();
-                if (this.path.Count == 0)
+                if (this.stops.Count == 0)
                 {
                     this.finish();
                     return;
@@ -78,12 +77,8 @@ namespace WaterBot.Framework
         {
             this.map = new Map();
             this.map.loadMap();
-            List<Group> groups = WaterBot.config.UseSmallGrouping
-                ? this.map.getMinimalCoverGroups() : this.map.findGroupings(this.console!);
-            this.path = this.map.findGroupPath(this.console!, groups);
-            this.currentGroup = 0;
-            this.currentTile = 0;
-            this.order.Clear();
+            this.stops = this.map.planStops(this.console!);
+            this.currentStop = 0;
             this.refillStation = null;
             this.finishingRefill = false;
         }
@@ -119,28 +114,19 @@ namespace WaterBot.Framework
                 this.useNext(this.refillStation);
                 return;
             }
-            // Skip exhausted/empty groups without ever indexing an empty stop list.
-            while (this.currentTile >= this.order.Count)
+            while (this.currentStop < this.stops.Count && this.stops[this.currentStop].isDone())
+                this.currentStop++;
+            if (this.currentStop >= this.stops.Count)
             {
-                if (this.currentGroup >= this.path.Count)
-                {
-                    if (WaterBot.config.RefillOnFinish && !this.can!.IsBottomless && !this.farmer.hasWateringCanEnchantment
-                        && this.can.WaterLeft < this.can.waterCanMax
-                        && this.can.WaterLeft < this.can.waterCanMax * Math.Clamp(WaterBot.config.RefillIfLower, 0, 100) / 100f)
-                        this.refill(true);
-                    else
-                        this.finish();
-                    return;
-                }
-                this.order = this.map.findFillPath(this.path[this.currentGroup++], this.console!);
-                this.currentTile = 0;
-            }
-            ActionableTile stop = this.order[this.currentTile];
-            if (stop.isDone())
-            {
-                this.currentTile++;
+                if (WaterBot.config.RefillOnFinish && !this.can!.IsBottomless && !this.farmer.hasWateringCanEnchantment
+                    && this.can.WaterLeft < this.can.waterCanMax
+                    && this.can.WaterLeft < this.can.waterCanMax * Math.Clamp(WaterBot.config.RefillIfLower, 0, 100) / 100f)
+                    this.refill(true);
+                else
+                    this.finish();
                 return;
             }
+            ActionableTile stop = this.stops[this.currentStop];
             if (this.can!.WaterLeft <= 0 && !this.farmer.hasWateringCanEnchantment)
             {
                 this.refill(false);

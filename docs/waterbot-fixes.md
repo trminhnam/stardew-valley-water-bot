@@ -1,6 +1,6 @@
 # WaterBot fixes: changes, build and test notes
 
-Status as of 2026-11-11: the code changes are complete. The regression harness (18 scenarios) passes on .NET 8.0.428. **The mod has not been compiled against the real game and SMAPI, and it has not been tested in the game.** The machine used for development had no SMAPI installed.
+Status as of 2026-11-11: the code changes are complete. The regression harness (21 scenarios) passes on .NET 8.0.428. **The mod has not been compiled against the real game and SMAPI, and it has not been tested in the game.** The machine used for development had no SMAPI installed.
 
 ## Reported problems
 
@@ -33,6 +33,7 @@ There is no season or year check in the code. "Late summer" most likely lines up
 - Watering uses the game's own tool animation (`endUsing`). The actual effect runs through `Farmer.toolOverrideFunction`, which calls `WateringCan.DoFunction` on the exact target tile with tool power 0 (one tile).
 - Soil is re-checked before the action and again when the effect fires, so already-watered crops are skipped.
 - A crop only counts as done if its soil is wet afterwards. A failed attempt is retried once, then the run stops.
+- The run follows one planned list of stops (see `Map.cs` below) instead of planning group by group.
 - Refill after finishing now ends the run instead of replaying the route.
 - At the end, the bot reports how many crops still need water (unreachable or skipped).
 - Bottomless and enchanted cans don't go looking for water.
@@ -54,18 +55,37 @@ Refilling is never blocked by stamina. If the can runs dry at low stamina, the b
 
 The limit is the `MinStamina` constant in `WaterBotController.cs`.
 
-### `WaterBot/Framework/Map.cs`
+### `WaterBot/Framework/Map.cs` (planner rewritten)
 
-- After loading the map, a flood fill from the player marks every reachable tile. Standing tiles must be reachable and not blocked.
-- `findFillPath` was rewritten. It picks standing tiles that cover the most remaining crops (including diagonals) and plans each crop once. The "planned" flags are no longer cleared between groups.
-- `findGroupings` uses a loop instead of recursion and no longer reads past the map edge.
-- The single-group shortcut in `findGroupPath` was removed, so reachability is always checked.
-- `getMinimalCoverGroups` (the "small grouping" option) was replaced by a greedy cover built from `findFillPath`. It behaves differently from the algorithm added in PR #11/#12.
-- `getClosestRefill` handles the case where the player stands next to the water.
+The old planner grouped crops that touch side by side, ran a separate A* path search between every pair of groups to build a cost matrix, ordered the groups greedily, then planned each group on its own. It has been replaced by one pass over the whole farm:
 
-### `WaterBot/Framework/Group.cs`
+- `loadMap` runs a breadth-first search from the player. Every step costs the same, so this gives the exact walking distance to every tile (around fences, buildings and trellises), not just whether it is reachable. Standing tiles must be reachable and not blocked.
+- `planStops` builds the whole run:
+  1. From the current position, find the nearest crop by real walking distance to its closest standing tile (the crop's own tile or any of its 8 neighbors).
+  2. Of that crop's standing tiles, pick the one that reaches the most remaining crops (ties go to the closer one).
+  3. Queue every remaining crop in reach once, and repeat from that tile.
+  Crops with no reachable standing tile are logged and reported at the end.
+- `getClosestRefill` uses a proper queue (it used to remove from the front of a list) and handles the case where the player stands next to the water.
+- Removed: `findGroupings`, `getMinimalCoverGroups`, `generateCostMatrix`, `findGroupPath`, `findFillPath`, `walkablePathBetweenPoints` (A*), `findClosestWalkableTile` and `convertCoords`.
 
-- `Centroid` now returns a reachable standing tile from `Map.groupStandingPlace`.
+Measured on an 80×65 map (the standard farm's size) with the test stand-ins. Walking is the real walking distance along the planned stops:
+
+| Layout | Old default mode | Old "small grouping" | New planner |
+|---|---|---|---|
+| 120 crops in rows | 40 stops, 120 tiles walked, 20 ms | 20 stops, 66 tiles, 17 ms | 20 stops, 66 tiles, 14 ms |
+| 480 crops in rows | 160 stops, 476 tiles, 14 ms | 80 stops, 248 tiles, **691 ms** | 80 stops, 248 tiles, 29 ms |
+| 480 crops in rows, half trellis | 160 stops, 484 tiles, 11 ms | 80 stops, 252 tiles, 212 ms | 81 stops, 258 tiles, 26 ms |
+| 480 crops, none touching side by side | 480 stops, 908 tiles, **28.5 s** | 126 stops, 484 tiles, **2.1 s** | 126 stops, 484 tiles, 40 ms |
+
+Planning runs on the game thread, so the old times were the length of the freeze when the bot started (and again on every refill with "Redo path on refill" on). The real game will be somewhat slower than the stand-ins, mostly from the collision checks in `loadMap`. Compared with the old default mode, the new planner walks about half as far, because it can stand on the path between two rows and water both. It matches the old "small grouping" mode's routes, except for 2% more walking on the trellis layout.
+
+### Removed: `WaterBot/Framework/Group.cs`
+
+No longer used.
+
+### `WaterBot/Framework/Tile.cs`
+
+- Removed the planning flags (`visited`, `watered`, `waterCheck`, `walkableCheck`), `reset()` and `distanceTo()`, which only the old planner used.
 
 ### `WaterBot/ModEntry.cs`
 
@@ -74,10 +94,11 @@ The limit is the `MinStamina` constant in `WaterBotController.cs`.
 - Only starts when the player is free and not already using a tool.
 - The clicked crop must be dry and growing. Harvest-ready crops keep their normal right-click behaviour.
 - The triggering click is suppressed so the game doesn't also handle it.
+- The "Use small grouping" option was removed from the config and the Generic Mod Config Menu. An existing `config.json` that still contains `UseSmallGrouping` loads fine; the value is ignored and dropped the next time the config is saved.
 
 ### Other files
 
-- `WaterBot/i18n/default.json`: new messages `process.failed` and `process.remaining`. Other languages fall back to English for these two.
+- `WaterBot/i18n/default.json`: new messages `process.failed` and `process.remaining` (other languages fall back to English for these two). Removed the two `config.use_small_grouping` entries.
 - `README.md` and `CHANGELOG.md`: updated descriptions.
 - `tests/`: new standalone regression harness (see below).
 
@@ -94,7 +115,7 @@ The limit is the `MinStamina` constant in `WaterBotController.cs`.
 dotnet run --project tests/WaterBot.RegressionTests.csproj
 ```
 
-Expected: `18 regression scenarios passed.` The only warning is the old one about the lowercase `console` type name.
+Expected: `21 regression scenarios passed.` The large-farm test also prints its planning times (about 0.1 s each). The only warning is the old one about the lowercase `console` type name.
 
 These tests use simplified stand-ins for the game, not the real game. They check the planner and the bot's state handling, but not real collisions, pathfinding, input or animations.
 
@@ -121,19 +142,20 @@ Compile errors here would mean a game or SMAPI API doesn't match. The names were
 The highest-risk item is **1**. The new watering path assumes that `Tool.endUsing` starts the animation, the animation calls `Farmer.useTool`, which runs `toolOverrideFunction`, and that `WateringCan.DoFunction` uses `who.toolPower` to decide how many tiles to water. If any of these is wrong, every watering fails twice and the run stops at the first crop.
 
 1. **Basic watering.** Plant a small plot and run the bot. Each dry crop should get exactly one watering. Check the soil, not just the animation direction.
-2. **Diagonal crops.** Plant crops touching only at the corners, in both grouping modes. No crop should be watered twice.
-3. **Stamina.**
+2. **Diagonal crops.** Plant crops touching only at the corners. No crop should be watered twice.
+3. **Route and freeze.** On a large farm (several hundred crops, ideally with gaps between plants), the game should not freeze noticeably when the bot starts. For rows with a 1-tile path between them, the farmer should walk along the path watering both rows. With a fence between the farmer and nearby crops, the bot should water the crops it can reach directly first.
+4. **Stamina.**
    - Start at 2 or 1 stamina: the bot must not start ("Tired of Watering").
    - Start at about 7 with many crops: it should water 3 crops and stop at 1.
    - Let the can run dry at low stamina: it should still refill, then stop before the next watering.
    - Stamina must never reach 0.
-4. **Trellis crops and unreachable crops.** Trellis rows, a crop fenced in, a blocked route. Reachable crops get watered, and unreachable ones are reported at the end. The bot must not get stuck; another right-click should start it again.
-5. **Stopping.** Press any key while moving, watering and refilling, then start again right away. The old run must not move the farmer or use water.
-6. **Refills.** Empty the can mid-run with "Redo path on refill" on and off. Then test "Refill on finish": it should refill once and finish without walking the last route again.
-7. **Interruptions.** Open a menu (pauses), change tools, warp, end the day, return to title (all cancel cleanly, and the farmer can move afterwards).
-8. **Controller and hidden cursor.** Repeat test 1 with a controller and with the viewport scrolled.
-9. **Triggering.** Right-click a growing crop (starts), a harvest-ready crop (harvests normally), and an already-watered crop (does nothing).
-10. **Multiplayer.** Have another player water a crop the bot planned to water. The bot should skip it.
+5. **Trellis crops and unreachable crops.** Trellis rows, a crop fenced in, a blocked route. Reachable crops get watered, and unreachable ones are reported at the end. The bot must not get stuck; another right-click should start it again.
+6. **Stopping.** Press any key while moving, watering and refilling, then start again right away. The old run must not move the farmer or use water.
+7. **Refills.** Empty the can mid-run with "Redo path on refill" on and off. Then test "Refill on finish": it should refill once and finish without walking the last route again.
+8. **Interruptions.** Open a menu (pauses), change tools, warp, end the day, return to title (all cancel cleanly, and the farmer can move afterwards).
+9. **Controller and hidden cursor.** Repeat test 1 with a controller and with the viewport scrolled.
+10. **Triggering.** Right-click a growing crop (starts), a harvest-ready crop (harvests normally), and an already-watered crop (does nothing).
+11. **Multiplayer.** Have another player water a crop the bot planned to water. The bot should skip it.
 
 Watch the SMAPI console during testing. Every early stop logs its reason as an error.
 
@@ -143,8 +165,6 @@ Watch the SMAPI console during testing. Every early stop logs its reason as an e
 2. **Pets and animals can end a run.** The standing tile is checked for collisions right before moving. A pet or farm animal on that tile, or blocking the path for 3 seconds, ends the run (if the game treats them as obstacles; not confirmed).
 3. **The splash can still look misaimed.** The bot still faces up or down for diagonal crops, and faces right when watering its own tile. The correct soil gets wet, but the animation points elsewhere.
 4. **Starting is stricter.** Clicking an already-watered crop does nothing and shows no message.
-5. **Small grouping algorithm replaced.** Mention this in the pull request.
-6. **Minor:**
-   - Diagonal crops in different groups now each get their own stop (a little more walking).
-   - `Map.findClosestWalkableTile` and `Tile.reset()` are unused.
-   - The new changelog entry sits above `v1.2.1`, while `manifest.json` says 1.4.1, and the version was not bumped.
+5. **"Use small grouping" removed.** Both old modes are replaced by the single planner. Mention this in the pull request, since it replaces the algorithm added in PR #11/#12 and removes a setting.
+6. **Route order is still greedy.** The planner always goes to the nearest unwatered crop. An improvement pass over the finished route (such as 2-opt) could shorten walking further, typically by 10–20%.
+7. **The changelog entry** sits above `v1.2.1`, while `manifest.json` says 1.4.1, and the version was not bumped.

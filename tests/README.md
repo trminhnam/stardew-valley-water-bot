@@ -8,13 +8,13 @@ dotnet run --project tests/WaterBot.RegressionTests.csproj
 
 This executable links the production planner/controller source and uses small game/API doubles. It requires no game installation or test packages. Assertion failures produce a nonzero exit code.
 
-The scenarios cover duplicate diagonal targets, live soil checks, explicit targeting, stale run callbacks, trellis standing positions, unreachable single groups, map edges, movement/animation failures, lifecycle cancellation, resource limits, and both refill settings. An exhaustive sweep also checks all 512 patterns of a 3×3 crop patch in both grouping modes, mixing trellises and walkable crops.
+The scenarios cover duplicate diagonal targets, live soil checks, explicit targeting, stale run callbacks, trellis standing positions, unreachable crops, map edges, movement/animation failures, lifecycle cancellation, stamina limits, and both refill settings. Planner checks cover watering two rows from the path between them, ordering stops by walking distance around a wall, and planning a 480-crop farm in under 2 seconds (it takes about 0.1 s). An exhaustive sweep also checks all 512 patterns of a 3×3 crop patch, mixing trellises and walkable crops.
 
 These checks do not exercise the real game's collision, input, animation, or multiplayer engines. Separately build the production project against installed game and SMAPI assemblies to catch API compatibility errors.
 
 ## In-game verification
 
-1. In both grouping modes, water diagonal crops and dense plots with a base and upgraded can. Each dry crop should receive one action; already-watered soil should consume none.
+1. Water diagonal crops and dense plots with a base and upgraded can. Each dry crop should receive one action; already-watered soil should consume none.
 2. Repeat with a controller, hidden mouse cursor, and a scrolled viewport. Check the soil tile affected, not just the direction of the farmer's pouring animation.
 3. Test trellis rows, an enclosed crop, and a blocked route. Accessible crops should be watered; an unreachable crop should be reported. A path failure must leave the bot idle and allow another activation.
 4. Stop during movement, watering, and refilling, then restart immediately. The old run must not move the farmer, consume water, or restart itself.

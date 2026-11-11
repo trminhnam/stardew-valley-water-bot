@@ -8,9 +8,9 @@ using Mod = WaterBot.WaterBot;
 
 var tests = new (string, Action)[]
 {
-    ("Diagonal crops are watered once in both grouping modes", Diagonal),
+    ("Diagonal crops are watered once", Diagonal),
     ("Planner stays within map bounds and covers accessible trellises", Planner),
-    ("Single unreachable group finishes without becoming stuck", Unreachable),
+    ("An unreachable crop is reported without getting stuck", Unreachable),
     ("Live soil is rechecked immediately before the tool effect", LiveSoil),
     ("Explicit tile survives stale facing/click and charged can state", ExactTarget),
     ("Cancelled tool callbacks cannot affect a restarted run", StaleRun),
@@ -22,10 +22,13 @@ var tests = new (string, Action)[]
     ("Paused ticks do not time out; location/tool changes cancel", Lifecycle),
     ("Bottomless and enchanted cans do not seek unnecessary refills", Bottomless),
     ("A timed-out animation releases player and tool ownership", AnimationTimeout),
-    ("All 3x3 crop patterns are covered once in both modes", AllPatterns),
+    ("All 3x3 crop patterns (with trellises) are covered once", AllPatterns),
     ("Cancelled refill cannot restart or move a new run", CancelledRefill),
     ("No-water and low-stamina exits return to idle", ResourceLimits),
     ("Stamina is checked before every watering and never reaches 0", Stamina),
+    ("Rows split by a path are watered from the path, 6 crops per stop", RowsFromPath),
+    ("Stops are ordered by walking distance, not straight-line distance", WalkingOrder),
+    ("Large farms plan quickly (no multi-second freeze)", LargeFarmSpeed),
 };
 foreach (var (name, test) in tests)
 {
@@ -81,43 +84,31 @@ static void UntilTool(WaterBotController bot)
 }
 static void Diagonal()
 {
-    foreach (bool small in new[] { false, true })
-    {
-        Reset(new(2, 2), new(3, 3));
-        Mod.config.UseSmallGrouping = small;
-        Run(Start());
-        Check(Game1.player.CurrentTool!.Uses.Count == 2 && Game1.player.CurrentTool.Uses.Distinct().Count() == 2, "Duplicate or missed watering");
-    }
+    Reset(new(2, 2), new(3, 3));
+    Run(Start());
+    Check(Game1.player.CurrentTool!.Uses.Count == 2 && Game1.player.CurrentTool.Uses.Distinct().Count() == 2, "Duplicate or missed watering");
 }
 static void Planner()
 {
-    foreach (bool small in new[] { false, true })
+    // Crops on the map edge and corner, plus two trellises (blocked crops).
+    Reset(new(7, 7), new(0, 0), new(3, 3), new(3, 4));
+    Game1.currentLocation.Blocks.UnionWith(new[] { new Point(3, 3), new Point(3, 4) });
+    Map map = new(); map.loadMap();
+    List<Point> targets = new();
+    foreach (var stop in map.planStops(_ => { }))
     {
-        Reset(new(7, 7), new(0, 0), new(3, 3), new(3, 4));
-        Game1.currentLocation.Blocks.UnionWith(new[] { new Point(3, 3), new Point(3, 4) });
-        Map map = new(); map.loadMap();
-        var groups = small ? map.getMinimalCoverGroups() : map.findGroupings(_ => { });
-        var stops = map.findGroupPath(_ => { }, groups).SelectMany(g => map.findFillPath(g, _ => { })).ToList();
-        List<Point> targets = new();
-        foreach (var stop in stops)
-        {
-            Check(map.isReachable(stop.getStand()), "Blocked or unreachable stand");
-            while (!stop.isDone()) targets.Add(stop.Pop());
-        }
-        Check(targets.Count == 4 && targets.Distinct().Count() == 4, "Incomplete planner coverage");
+        Check(map.isReachable(stop.getStand()), "Blocked or unreachable stand");
+        while (!stop.isDone()) targets.Add(stop.Pop());
     }
+    Check(targets.Count == 4 && targets.Distinct().Count() == 4, "Incomplete planner coverage");
 }
 static void Unreachable()
 {
-    foreach (bool small in new[] { false, true })
-    {
-        Reset(new Point(5, 5));
-        Mod.config.UseSmallGrouping = small;
-        for (int y = 4; y <= 6; y++) for (int x = 4; x <= 6; x++) Game1.currentLocation.Blocks.Add(new(x, y));
-        var bot = Start(); Run(bot);
-        Check(Game1.player.CurrentTool!.Uses.Count == 0, "Attempted inaccessible crop");
-        Check(Game1.Messages.Last().Text == "process.remaining", "Skipped crop not reported");
-    }
+    Reset(new Point(5, 5));
+    for (int y = 4; y <= 6; y++) for (int x = 4; x <= 6; x++) Game1.currentLocation.Blocks.Add(new(x, y));
+    var bot = Start(); Run(bot);
+    Check(Game1.player.CurrentTool!.Uses.Count == 0, "Attempted inaccessible crop");
+    Check(Game1.Messages.Last().Text == "process.remaining", "Skipped crop not reported");
 }
 static void LiveSoil()
 {
@@ -234,18 +225,16 @@ static void AnimationTimeout()
 }
 static void AllPatterns()
 {
-    foreach (bool small in new[] { false, true })
     for (int mask = 0; mask < 512; mask++)
     {
         var crops = Enumerable.Range(0, 9).Where(i => (mask & (1 << i)) != 0).Select(i => new Point(3 + i % 3, 3 + i / 3)).ToArray();
         Reset(crops);
         // Mix walkable crops and trellises while preserving access around the plot.
         Game1.currentLocation.Blocks.UnionWith(crops.Where(p => (p.X + p.Y) % 2 == 0));
-        Mod.config.UseSmallGrouping = small;
         Run(Start());
         var uses = Game1.player.CurrentTool!.Uses;
         Check(uses.Count == crops.Length && uses.Distinct().Count() == crops.Length,
-            $"Incomplete/duplicate watering for pattern {mask}, small={small}");
+            $"Incomplete/duplicate watering for pattern {mask}");
     }
 }
 static void CancelledRefill()
@@ -316,6 +305,51 @@ static void Stamina()
     Run(running);
     Check(Game1.player.CurrentTool!.Uses.Count == 0 && Game1.player.Stamina == 2
         && Game1.Messages.Last().Text == "process.exhausted", "Tool effect ignored low stamina");
+}
+
+static void Farm(int width, int height, Point player, IEnumerable<Point> crops)
+{
+    Reset(crops.ToArray());
+    Game1.currentLocation.map.Layers[0].LayerWidth = width;
+    Game1.currentLocation.map.Layers[0].LayerHeight = height;
+    Game1.player.TilePoint = player;
+}
+static void RowsFromPath()
+{
+    // Two 60-crop rows (y=5 and y=7) with a walking path between them (y=6).
+    Farm(80, 65, new(2, 2), Enumerable.Range(5, 60).SelectMany(x => new[] { new Point(x, 5), new Point(x, 7) }));
+    Map map = new(); map.loadMap();
+    var stops = map.planStops(_ => { });
+    Check(stops.Count == 20, $"Expected 20 stops of 6 crops, got {stops.Count}");
+    Check(stops.All(s => s.getStand().Y == 6), "A stop was not on the path between the rows");
+}
+static void WalkingOrder()
+{
+    // A wall at x=3 (open only at the bottom) separates the player from crop A.
+    // A is 3 tiles away in a straight line but ~35 tiles to walk; B is 6 away on the player's side.
+    Point a = new(5, 10), b = new(2, 16);
+    Farm(30, 30, new(2, 10), new[] { a, b });
+    for (int y = 0; y <= 25; y++) Game1.currentLocation.Blocks.Add(new(3, y));
+    Map map = new(); map.loadMap();
+    var stops = map.planStops(_ => { });
+    Check(stops.Count == 2 && stops[0].Pop() == b && stops[1].Pop() == a, "Planner ignored the wall when ordering stops");
+}
+static void LargeFarmSpeed()
+{
+    // 480 crops with no side contact (the old planner's worst case: ~30 s) and 480 in rows.
+    var scattered = Enumerable.Range(0, 35).SelectMany(i => Enumerable.Range(0, 28).Select(j => new Point(5 + i * 2, 5 + j * 2))).Take(480);
+    var rows = Enumerable.Range(0, 8).SelectMany(r => Enumerable.Range(5, 60).Select(x => new Point(x, 5 + r * 2)));
+    foreach (var (name, crops) in new[] { ("scattered", scattered), ("rows", rows) })
+    {
+        Farm(80, 65, new(2, 2), crops);
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        Map map = new(); map.loadMap();
+        var stops = map.planStops(_ => { });
+        watch.Stop();
+        Console.WriteLine($"     {name}: {crops.Count()} crops -> {stops.Count} stops, planned in {watch.ElapsedMilliseconds} ms");
+        Check(stops.Sum(s => { int n = 0; while (!s.isDone()) { s.Pop(); n++; } return n; }) == crops.Count(), $"Lost crops ({name})");
+        Check(watch.ElapsedMilliseconds < 2000, $"Planning {name} took {watch.ElapsedMilliseconds} ms");
+    }
 }
 
 sealed class Helper : IModHelper { public Translations Translation { get; } = new(); }
