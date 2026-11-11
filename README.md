@@ -50,7 +50,7 @@ Good morning!
 
 Time to water your crops.
 
-Pull out your **Watering Can**, and **left-click** on any of your beautiful crops as if you were watering them.
+Pull out your **Watering Can**, and use your **action button** (normally right-click) on a growing crop. Crops ready to harvest keep their normal action-button behavior.
 
 By a miracle of love for your budding crops, you're carried away into watering the rest of them without pushing so much as a button.
 
@@ -100,7 +100,7 @@ Tiles with crops that need watering are then grouped based on adjacency using de
 
 The bot then uses A* pathfinding to determine the cost of traveling from one group to another.
 
-The algorithm starts at the tile closest to the centroid of each grouping.
+Each group is represented by a reachable standing tile near its centroid. A flood fill from the player identifies reachable positions, including standing places beside trellis crops.
 
 The cost of traveling to each group is also done from the player's current position.
 
@@ -127,11 +127,11 @@ The starting point is the player's position.
 
 ### 6. Watering the Group
 
-For each group, depth first search is applied to fill in the tiles.
+For each group, the planner chooses reachable standing positions that cover nearby crops, including diagonals. Each crop is queued once, and the bot checks the live soil again before using the can so crops already watered by another player or action are skipped.
 
-At each tile, all adjacent (now including diagonals) are watered as well. This means we can skip walking to every block and simply water anything around us.
+Watering uses the normal can effect and animation, with an explicit target tile. The bot waits for animation completion and checks the result before advancing. Failed effects are retried once; missing paths, stalled movement, and repeated tool failures stop the run with a message and details in the SMAPI log.
 
-If a block cannot be stood on, the bot chooses the next best option and waters it from there.
+The optional small-grouping mode builds groups around reachable watering positions instead of using side-connected crop patches. Crops without an accessible watering position are reported at the end.
 
 <img src="https://raw.githubusercontent.com/andyruwruw/stardew-valley-water-bot/main/documentation/implementation/fill_group.gif">
 
@@ -144,3 +144,9 @@ The closest refillable spot is found using breadth-first-search from the player'
 Once the spot is found, the bot navigates the player to the closest spot to the water, refills, then returns to watering.
 
 <img src="https://raw.githubusercontent.com/andyruwruw/stardew-valley-water-bot/main/documentation/implementation/refill_water.gif">
+
+# Development checks
+
+Build the mod with `dotnet build WaterBot/WaterBot.csproj` after installing Stardew Valley and SMAPI. To build without deploying into the game, pass `-p:EnableModDeploy=false -p:EnableModZip=false`.
+
+Run the standalone regression harness with `dotnet run --project tests/WaterBot.RegressionTests.csproj` (.NET 8 SDK). See [tests/README.md](tests/README.md) for its scope and the in-game verification checklist.

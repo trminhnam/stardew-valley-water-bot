@@ -1,359 +1,388 @@
-﻿using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework;
 using StardewModdingAPI;
 using StardewValley;
-using StardewValley.Tools;
 using StardewValley.Pathfinding;
+using StardewValley.Tools;
 
 namespace WaterBot.Framework
 {
-    /// <summary>
-    /// Defines the process of the Bot being active.
-    /// </summary>
+    /// <summary>Runs navigation and tool use exclusively from the game's update loop.</summary>
     class WaterBotController
     {
+        private enum State { Idle, Planning, Ready, Moving, UsingTool }
+
+        /// <summary>Watering costs up to 2 stamina, so never water at or below this.
+        /// Watering at 2 or 1 could reach 0 or less, which exhausts the farmer.
+        /// Walking and refilling cost no stamina and are not limited by it.</summary>
+        private const float MinStamina = 2f;
+
         private readonly IModHelper helper;
-        public bool active;
-        public Map map;
-        public int currentGroup;
-        public List<Group> path;
-        public int currentTile;
-        public List<ActionableTile> order;
+        private State state;
+        public bool active => this.state != State.Idle;
+        private Map map = new();
+        private List<Group> path = new();
+        private List<ActionableTile> order = new();
+        private int currentGroup;
+        private int currentTile;
         private ActionableTile? refillStation;
-        public console? console;
+        private bool finishingRefill;
+        private console? console;
+        private Farmer? farmer;
+        private GameLocation? location;
+        private WateringCan? can;
+        private PathFindController? movement;
+        private AnimatedSprite.endOfAnimationBehavior? toolEffect;
+        private long runId;
+        private Point destination;
+        private Point target;
+        private Vector2 lastPosition;
+        private int stalledTicks;
+        private int toolTicks;
+        private bool effectApplied;
+        private readonly Dictionary<Point, int> attempts = new();
 
-        public WaterBotController(IModHelper helper)
-        {
-            this.helper = helper;
-            this.active = false;
-            this.map = new Map();
-            this.path = new List<Group>();
-            this.order = new List<ActionableTile>();
-        }
+        public WaterBotController(IModHelper helper) => this.helper = helper;
 
-        /// <summary>
-        /// Starts the bot up.
-        /// </summary>
-        /// 
-        /// <param name="console">Function for printing to debug console.</param>
         public void start(console console, bool showMessage = true)
         {
+            this.cancel();
+            if (!Context.IsWorldReady || Game1.player.CurrentTool is not WateringCan wateringCan
+                || Game1.player.UsingTool || Game1.player.toolOverrideFunction != null)
+                return;
+            if (Game1.player.Stamina <= MinStamina)
+            {
+                this.message("process.exhausted", 3);
+                return;
+            }
+
             this.console = console;
-            this.active = true;
+            this.farmer = Game1.player;
+            this.location = Game1.currentLocation;
+            this.can = wateringCan;
+            this.attempts.Clear();
+            this.state = State.Planning;
+            this.guarded(() =>
+            {
+                this.plan();
+                if (this.path.Count == 0)
+                {
+                    this.finish();
+                    return;
+                }
+                this.state = State.Ready;
+                if (showMessage) this.message("process.start", 2);
+            });
+        }
 
-            // Load map data
+        private void plan()
+        {
+            this.map = new Map();
             this.map.loadMap();
-
-            if (!this.active) return;
-
-            // Group waterable tiles
-            List<Group> groupings;
-            if (WaterBot.config.UseSmallGrouping)
-            {
-                groupings = this.map.getMinimalCoverGroups();
-            }
-            else
-            {
-                groupings = this.map.findGroupings(this.console);
-            }
-
-            if (!this.active) return;
-
+            List<Group> groups = WaterBot.config.UseSmallGrouping
+                ? this.map.getMinimalCoverGroups() : this.map.findGroupings(this.console!);
+            this.path = this.map.findGroupPath(this.console!, groups);
             this.currentGroup = 0;
             this.currentTile = 0;
-
-            this.path = this.map.findGroupPath(this.console, groupings);
-
-            if (path.Count == 0)
-            {
-                this.active = false;
-                return;
-            }
-
-            if (showMessage)
-            {
-                this.displayMessage(this.helper.Translation.Get("process.start"), 2);
-            }
-
-            if (!this.active) return;
-
-            this.order = this.map.findFillPath(this.path[this.currentGroup], this.console);
-
-            if (!this.active) return;
-
-            if (((WateringCan)Game1.player.CurrentTool).WaterLeft <= 0)
-            {
-                this.refillWater();
-                return;
-            }
-
-            Game1.player.controller = new PathFindController(Game1.player, Game1.currentLocation, this.order[this.currentTile].getStand(), 2, this.startWatering);
+            this.order.Clear();
+            this.refillStation = null;
+            this.finishingRefill = false;
         }
 
-        /// <summary>
-        /// Begins the process of watering current actionable tile
-        /// </summary>
-        /// 
-        /// <param name="c">Character object of player.</param>
-        /// <param name="location">Location of character.</param>
-        public void startWatering(Character c, GameLocation location)
-        {
-            Game1.player.controller = null;
-
-            if (!this.active) return;
-
-            if (Game1.player.Stamina <= 2f)
-            {
-                this.exhausted();
-                return;
-            }
-
-            if (((WateringCan)Game1.player.CurrentTool).WaterLeft <= 0)
-            {
-                this.refillWater();
-                return;
-            }
-
-            Point point = this.order[this.currentTile].Pop();
-
-            if (point.X != -1)
-            {
-                this.water(point);
-                Task.Delay(800).ContinueWith(o => { this.startWatering(c, location); });
-            }
-            else
-            {
-                this.navigate();
-            }
-        }
-
-        /// <summary>
-        /// Waters a tile
-        /// </summary>
-        /// 
-        /// <param name="tile">Tile to water.</param>
-        public void water(Point tile)
-        {
-            if (Game1.player.TilePoint.Y > tile.Y)
-            {
-                Game1.player.FacingDirection = 0;
-            }
-            else if (Game1.player.TilePoint.Y < tile.Y)
-            {
-                Game1.player.FacingDirection = 2;
-            }
-            else if (Game1.player.TilePoint.X > tile.X)
-            {
-                Game1.player.FacingDirection = 3;
-            }
-            else if (Game1.player.TilePoint.X < tile.X)
-            {
-                Game1.player.FacingDirection = 1;
-            }
-
-            if (Game1.player.isEmoteAnimating)
-            {
-                Game1.player.EndEmoteAnimation();
-            }
-
-            Game1.player.FarmerSprite.SetOwner(Game1.player);
-            Game1.player.CanMove = false;
-            Game1.player.UsingTool = true;
-            Game1.player.canReleaseTool = true;
-
-            Game1.player.Halt();
-            Game1.player.CurrentTool.Update(Game1.player.FacingDirection, 0, Game1.player);
-
-            Game1.player.stopJittering();
-            Game1.player.canReleaseTool = false;
-
-            int addedAnimationMultiplayer = ((!(Game1.player.Stamina <= 0f)) ? 1 : 2);
-            if (Game1.isAnyGamePadButtonBeingPressed() || !Game1.player.IsLocalPlayer)
-            {
-                Game1.player.lastClick = Game1.player.GetToolLocation();
-            }
-
-            if (((WateringCan)Game1.player.CurrentTool).WaterLeft > 0 && Game1.player.ShouldHandleAnimationSound())
-            {
-                Game1.player.currentLocation.localSound("wateringCan");
-            }
-
-            Game1.player.lastClick = new Vector2(tile.X * Game1.tileSize, tile.Y * Game1.tileSize);
-
-            switch (Game1.player.FacingDirection)
-            {
-                case 2:
-                    ((FarmerSprite)Game1.player.Sprite).animateOnce(164, 125f * (float)addedAnimationMultiplayer, 3);
-                    break;
-                case 1:
-                    ((FarmerSprite)Game1.player.Sprite).animateOnce(172, 125f * (float)addedAnimationMultiplayer, 3);
-                    break;
-                case 0:
-                    ((FarmerSprite)Game1.player.Sprite).animateOnce(180, 125f * (float)addedAnimationMultiplayer, 3);
-                    break;
-                case 3:
-                    ((FarmerSprite)Game1.player.Sprite).animateOnce(188, 125f * (float)addedAnimationMultiplayer, 3);
-                    break;
-            }
-
-            this.map.map[tile.Y][tile.X].waterable = false;
-        }
-
-        /// <summary>
-        /// Navigates to a point
-        /// </summary>
-        public void navigate()
+        public void tick()
         {
             if (!this.active) return;
-
-            this.currentTile += 1;
-
-            if (this.currentTile >= this.order.Count)
+            this.guarded(() =>
             {
-                this.currentGroup += 1;
-                this.currentTile = 0;
-
-                if (this.currentGroup >= this.path.Count)
+                if (!Context.IsWorldReady || Game1.player != this.farmer || Game1.currentLocation != this.location
+                    || this.farmer!.CurrentTool != this.can)
                 {
-                    if (WaterBot.config.RefillOnFinish && WaterBot.config.RefillIfLower * 0.01 > (float)((WateringCan)Game1.player.CurrentTool).WaterLeft / (float)((WateringCan)Game1.player.CurrentTool).waterCanMax)
-                    {
-                        this.refillWater();
-                        return;
-                    }
-                    this.end();
+                    this.cancel();
                     return;
                 }
+                // Paused/menu time must not consume movement or animation timeouts.
+                if (Game1.activeClickableMenu != null || !Game1.shouldTimePass()) return;
 
-                if (console != null)
+                switch (this.state)
                 {
-                    this.order = this.map.findFillPath(this.path[this.currentGroup], console);
+                    case State.Ready: this.advance(); break;
+                    case State.Moving: this.checkMovement(); break;
+                    case State.UsingTool: this.checkTool(); break;
                 }
-                else
-                {
-                    this.console?.Invoke("Console is null. Ending process.");
-                    this.active = false;
-                    return;
-                }
-            }
-
-            Game1.player.controller = new PathFindController(Game1.player, Game1.currentLocation, this.order[this.currentTile].getStand(), 2, this.startWatering);
+            });
         }
 
-        public void navigateNoUpdate()
+        private void advance()
         {
-            Game1.player.controller = new PathFindController(Game1.player, Game1.currentLocation, this.order[this.currentTile].getStand(), 2, this.startWatering);
-        }
-
-        public void refillWater()
-        {
-            if (!this.active) return;
-
-            Tile playerLocation = this.map.map[Game1.player.TilePoint.Y][Game1.player.TilePoint.X];
-
-            if (console != null)
-            {
-                this.refillStation = this.map.getClosestRefill(playerLocation, console);
-            }
-            else
-            {
-                this.console?.Invoke("Console is null. Ending process.");
-                this.active = false;
-                return;
-            }
-
-            if (!this.active) return;
-
+            if (this.farmer!.UsingTool) return;
             if (this.refillStation != null)
             {
-                Game1.player.controller = new PathFindController(Game1.player, Game1.currentLocation, refillStation.getStand(), 2, this.startRefilling);
+                this.useNext(this.refillStation);
+                return;
             }
-            else
+            // Skip exhausted/empty groups without ever indexing an empty stop list.
+            while (this.currentTile >= this.order.Count)
             {
-                this.noWater();
+                if (this.currentGroup >= this.path.Count)
+                {
+                    if (WaterBot.config.RefillOnFinish && !this.can!.IsBottomless && !this.farmer.hasWateringCanEnchantment
+                        && this.can.WaterLeft < this.can.waterCanMax
+                        && this.can.WaterLeft < this.can.waterCanMax * Math.Clamp(WaterBot.config.RefillIfLower, 0, 100) / 100f)
+                        this.refill(true);
+                    else
+                        this.finish();
+                    return;
+                }
+                this.order = this.map.findFillPath(this.path[this.currentGroup++], this.console!);
+                this.currentTile = 0;
             }
+            ActionableTile stop = this.order[this.currentTile];
+            if (stop.isDone())
+            {
+                this.currentTile++;
+                return;
+            }
+            if (this.can!.WaterLeft <= 0 && !this.farmer.hasWateringCanEnchantment)
+            {
+                this.refill(false);
+                return;
+            }
+            this.useNext(stop);
         }
 
-        public void startRefilling(Character c, GameLocation location)
+        private void useNext(ActionableTile stop)
         {
-            Game1.player.controller = null;
-
-            if (!this.active) return;
-
-            if (Game1.player.Stamina <= 2f)
+            // Only watering costs stamina; walking and refilling do not. A tired farmer can't
+            // water anything at a watering stop, so stop here instead of walking to it first.
+            if (stop.getAction() == ActionableTile.Action.Water && this.tooTired())
             {
                 this.exhausted();
                 return;
             }
-
-            Point point = this.refillStation?.Pop() ?? new Point(-1, -1);
-
-            if (point.X != -1)
+            if (this.farmer!.TilePoint != stop.getStand())
             {
-                this.water(point);
-                Task.Delay(800).ContinueWith(o => {
-                    if (WaterBot.config.RedoPathOnRefill)
-                    {
-                        this.start(console, false);
-                    }
-                    else
-                    {
-                        this.navigateNoUpdate();
-                    }
-                });
+                this.moveTo(stop.getStand());
+                return;
+            }
+            Point next = stop.Pop();
+            if (next.X == -1) return;
+            if (stop.getAction() == ActionableTile.Action.Water && !Map.tileNeedsWatering(next.X, next.Y))
+                return; // Another stop, sprinkler, or player may already have watered this crop.
+            if (Math.Abs(next.X - this.farmer.TilePoint.X) > 1 || Math.Abs(next.Y - this.farmer.TilePoint.Y) > 1)
+                throw new InvalidOperationException($"Target {next} is outside watering range.");
+            this.beginTool(next);
+        }
+
+        private void moveTo(Point stand)
+        {
+            if (!this.map.isReachable(stand) || Map.tileIsPassable(stand.Y, stand.X))
+                throw new InvalidOperationException($"Watering position {stand} is blocked or unreachable.");
+            this.destination = stand;
+            this.movement = new PathFindController(this.farmer!, this.location!, stand, 2);
+            if (this.movement.pathToEndPoint == null || this.movement.pathToEndPoint.Count == 0)
+                throw new InvalidOperationException($"The game could not find a path to {stand}.");
+            this.lastPosition = this.farmer!.Position;
+            this.stalledTicks = 0;
+            this.farmer.controller = this.movement;
+            this.state = State.Moving;
+        }
+
+        private void checkMovement()
+        {
+            if (this.farmer!.controller != this.movement && this.farmer.controller != null)
+                throw new InvalidOperationException("The bot's movement controller was replaced.");
+            if (this.farmer.TilePoint == this.destination)
+            {
+                this.farmer.controller = null;
+                this.farmer.Halt();
+                this.movement = null;
+                this.state = State.Ready;
+                return;
+            }
+            if (this.farmer.controller == null || this.movement!.pathToEndPoint == null
+                || this.movement.pathToEndPoint.Count == 0)
+                throw new InvalidOperationException($"Movement ended before reaching {this.destination}.");
+            this.stalledTicks = this.farmer.Position == this.lastPosition ? this.stalledTicks + 1 : 0;
+            this.lastPosition = this.farmer.Position;
+            if (this.stalledTicks >= 180)
+                throw new InvalidOperationException($"Movement to {this.destination} stalled for three seconds.");
+        }
+
+        private void refill(bool finishing)
+        {
+            this.finishingRefill = finishing;
+            Point player = this.farmer!.TilePoint;
+            this.refillStation = this.map.getClosestRefill(this.map.map[player.Y][player.X], this.console!);
+            if (this.refillStation == null)
+            {
+                this.cancel();
+                this.message("process.waterless", 3);
             }
         }
 
-        /// <summary>
-        /// Cancels the bot's progress.
-        /// </summary>
+        private void beginTool(Point point)
+        {
+            Farmer player = this.farmer!;
+            WateringCan tool = this.can!;
+            GameLocation currentLocation = this.location!;
+            if (player.toolOverrideFunction != null)
+                throw new InvalidOperationException("Another tool action is already in progress.");
+            this.target = point;
+            this.effectApplied = false;
+            this.toolTicks = 0;
+            long id = this.runId;
+            bool watering = this.refillStation == null;
+            // The vanilla animation invokes Farmer.useTool. Its default targeting can ignore
+            // lastClick with a controller/hidden cursor, so supply the exact tile at that moment.
+            this.toolEffect = who => this.guarded(() =>
+            {
+                if (id != this.runId || this.state != State.UsingTool || this.effectApplied) return;
+                if (who != player || who.currentLocation != currentLocation || who.CurrentTool != tool)
+                    throw new InvalidOperationException("Player, location, or tool changed during watering.");
+                // Last check before watering spends stamina; checkTool reports exhaustion once the
+                // animation ends. Refilling costs no stamina, so it is never blocked here.
+                if (watering && who.Stamina <= MinStamina) return;
+                this.effectApplied = true;
+                if (watering && !Map.tileNeedsWatering(point.X, point.Y)) return;
+                float stamina = who.Stamina;
+                who.toolPower.Value = 0;
+                tool.DoFunction(currentLocation, point.X * Game1.tileSize + Game1.tileSize / 2,
+                    point.Y * Game1.tileSize + Game1.tileSize / 2, 0, who);
+                who.checkForExhaustion(stamina);
+            });
+            player.toolOverrideFunction = this.toolEffect;
+            player.FacingDirection = point.Y < player.TilePoint.Y ? 0 : point.Y > player.TilePoint.Y ? 2
+                : point.X < player.TilePoint.X ? 3 : 1;
+            player.FarmerSprite.SetOwner(player);
+            player.Halt();
+            player.CanMove = false;
+            player.UsingTool = true;
+            player.canReleaseTool = false;
+            player.toolPower.Value = 0;
+            player.lastClick = new Vector2(point.X * Game1.tileSize + Game1.tileSize / 2,
+                point.Y * Game1.tileSize + Game1.tileSize / 2);
+            this.state = State.UsingTool;
+            tool.Update(player.FacingDirection, 0, player);
+            tool.endUsing(currentLocation, player);
+        }
+
+        private void checkTool()
+        {
+            if (++this.toolTicks >= 300)
+                throw new InvalidOperationException("Watering animation did not complete within five seconds.");
+            if (this.farmer!.UsingTool) return;
+            this.releaseToolEffect();
+            bool refilling = this.refillStation != null;
+            bool success = this.effectApplied && (refilling
+                ? this.can!.WaterLeft >= this.can.waterCanMax
+                : !Map.tileNeedsWatering(this.target.X, this.target.Y));
+            if (!success)
+            {
+                if (!refilling && this.tooTired())
+                {
+                    this.exhausted();
+                    return;
+                }
+                int count = this.attempts.GetValueOrDefault(this.target) + 1;
+                this.attempts[this.target] = count;
+                if (count >= 2)
+                    throw new InvalidOperationException($"Tool use failed twice at {this.target}.");
+                // Revalidate before retrying. No snapshot is marked complete on a failed action.
+                if (!refilling && !Map.tileNeedsWatering(this.target.X, this.target.Y))
+                {
+                    this.state = State.Ready;
+                    return;
+                }
+                this.beginTool(this.target);
+                return;
+            }
+            if (!refilling)
+                this.map.map[this.target.Y][this.target.X].waterable = false;
+            else
+            {
+                this.refillStation = null;
+                if (this.finishingRefill)
+                {
+                    this.finish();
+                    return;
+                }
+                if (WaterBot.config.RedoPathOnRefill) this.plan();
+            }
+            this.state = State.Ready;
+        }
+
+        private void releaseToolEffect()
+        {
+            if (this.farmer != null && this.toolEffect != null && this.farmer.toolOverrideFunction == this.toolEffect)
+            {
+                this.farmer.toolOverrideFunction = null;
+                this.farmer.lastClick = Vector2.Zero;
+            }
+            this.toolEffect = null;
+        }
+
+        public void cancel()
+        {
+            this.runId++;
+            this.state = State.Idle;
+            if (this.farmer != null)
+            {
+                if (this.movement != null && this.farmer.controller == this.movement)
+                {
+                    this.farmer.controller = null;
+                    this.farmer.Halt();
+                }
+                if (this.toolEffect != null && this.farmer.toolOverrideFunction == this.toolEffect)
+                {
+                    this.farmer.FarmerSprite.CurrentAnimation = null;
+                    this.farmer.lastClick = Vector2.Zero;
+                    this.farmer.stopJittering();
+                    Farmer.canMoveNow(this.farmer);
+                }
+            }
+            this.releaseToolEffect();
+            this.movement = null;
+            this.refillStation = null;
+            this.finishingRefill = false;
+        }
+
+        private bool tooTired() => this.farmer!.Stamina <= MinStamina;
+
+        private void exhausted()
+        {
+            this.console?.Invoke($"Stamina is {this.farmer?.Stamina}; stopping before another action.");
+            this.cancel();
+            this.message("process.exhausted", 3);
+        }
+
         public void stop()
         {
-            this.active = false;
-            Game1.player.controller = null;
-            this.displayMessage(this.helper.Translation.Get("process.interrupt"), 1);
+            this.cancel();
+            this.message("process.interrupt", 1);
         }
 
-        /// <summary>
-        /// Cancels the bot's progress.
-        /// </summary>
-        public void exhausted()
+        private void finish()
         {
-            this.console?.Invoke("Bot interrupted by lack of stamina. Ending process.");
-            this.active = false;
-            Game1.player.controller = null;
-            this.displayMessage(this.helper.Translation.Get("process.exhausted"), 3);
+            int remaining = this.map.waterableTiles.Count(t => Map.tileNeedsWatering(t.x, t.y));
+            this.cancel();
+            if (remaining > 0)
+            {
+                this.console?.Invoke($"Finished with {remaining} crops still needing water (unreachable or skipped).");
+                Game1.addHUDMessage(new HUDMessage(this.helper.Translation.Get("process.remaining", new { count = remaining }), 3));
+            }
+            else this.message("process.end", 1);
         }
 
-        /// <summary>
-        /// Cancels the bot's progress.
-        /// </summary>
-        public void noWater()
+        private void guarded(Action action)
         {
-            this.console?.Invoke("Bot could not find suitable refill tile. Ending process.");
-            this.active = false;
-            Game1.player.controller = null;
-            this.displayMessage(this.helper.Translation.Get("process.waterless"), 3);
+            try { action(); }
+            catch (Exception ex)
+            {
+                this.cancel();
+                BotFramework.Logger.Log($"WaterBot stopped safely: {ex}", LogLevel.Error);
+                if (Context.IsWorldReady) this.message("process.failed", 3);
+            }
         }
 
-        /// <summary>
-        /// Cancels the bot's progress.
-        /// </summary>
-        public void end()
-        {
-            this.console?.Invoke("Bot finished watering accessible crops. Ending process.");
-            this.active = false;
-            Game1.player.controller = null;
-            this.displayMessage(this.helper.Translation.Get("process.end"), 1);
-        }
-
-        /// <summary>
-        /// Displays banner message.
-        /// </summary>
-        /// 
-        /// <param name="message">Banner text.</param>
-        /// <param name="type">Banner type.</param>
-        public void displayMessage(string message, int type)
-        {
-            Game1.addHUDMessage(new HUDMessage(message, type));
-        }
+        private void message(string key, int type) => Game1.addHUDMessage(new HUDMessage(this.helper.Translation.Get(key), type));
     }
 }

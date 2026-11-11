@@ -11,5 +11,7 @@
   "config.refill_if_lower.name": "Refill if lower",
   "config.refill_if_lower.desc": "On refill after completion, it only refills if remaining percentage is less",
   "config.redo_path_on_refill.name": "Redo path on refill",
-  "config.redo_path_on_refill.desc": "When refilling the pathfinding is calculated again"
+  "config.redo_path_on_refill.desc": "When refilling the pathfinding is calculated again",
+  "process.failed": "Watering stopped: could not complete the next action. See SMAPI log.",
+  "process.remaining": "Finished watering accessible crops; {{count}} crops still need water."
 }

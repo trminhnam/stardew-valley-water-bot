@@ -1,4 +1,4 @@
-﻿using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework;
 using System;
 using System.Collections.Generic;
 
@@ -62,46 +62,8 @@ namespace WaterBot.Framework
         /// </summary>
         public Point Centroid(Map map)
         {
-            if (center is not null)
-            {
-                return center.getPoint();   
-            }
-            int sumOfX = 0;
-            int sumOfY = 0;
-
-            foreach (Tile tile in this.list)
-            {
-                sumOfX += tile.x;
-                sumOfY += tile.y;
-            }
-
-            Point centroid = new Point(sumOfX / this.list.Count, sumOfY / this.list.Count);
-
-            int shortest = int.MaxValue;
-            Tile? centerWalkableTile = null;
-            int shortestNonWalkable = int.MaxValue;
-            Tile? centerNonWalkableTile = null;
-
-            foreach (Tile tile in this.list)
-            {
-                if (!tile.block && tile.distanceTo(centroid) < shortest)
-                {
-                    shortest = tile.distanceTo(centroid);
-                    centerWalkableTile = tile;
-                }
-                else if (tile.block && tile.distanceTo(centroid) < shortestNonWalkable)
-                {
-                    shortestNonWalkable = tile.distanceTo(centroid);
-                    centerNonWalkableTile = tile;
-                }
-            }
-
-            if (centerWalkableTile == null && centerNonWalkableTile != null)
-            {
-                return map.findClosestWalkableTile(centerNonWalkableTile).getPoint();
-            }
-
-            return centerWalkableTile?.getPoint() ?? centroid;
+            return map.groupStandingPlace(this)
+                ?? throw new InvalidOperationException("Group has no reachable watering position.");
         }
 
         public Tuple<Tile, double> findClosestTile(int x, int y)

@@ -1,4 +1,4 @@
-﻿using BotFramework;
+using BotFramework;
 using Microsoft.Xna.Framework;
 using StardewModdingAPI;
 using StardewModdingAPI.Events;
@@ -14,7 +14,7 @@ namespace WaterBot
     /// </summary>
     public class WaterBot : Mod
     {
-        internal static Config? config;
+        internal static Config config = new();
         private WaterBotController? bot;
 
         /// <summary>
@@ -30,6 +30,10 @@ namespace WaterBot
             // Set static reference to monitor for logging.
 
             helper.Events.Input.ButtonPressed += this.OnButtonPressed;
+            helper.Events.GameLoop.UpdateTicked += (s, e) => this.bot?.tick();
+            helper.Events.GameLoop.ReturnedToTitle += (s, e) => this.bot?.cancel();
+            helper.Events.GameLoop.DayEnding += (s, e) => this.bot?.cancel();
+            helper.Events.Player.Warped += (s, e) => { if (e.IsLocalPlayer) this.bot?.cancel(); };
             helper.Events.GameLoop.GameLaunched += (s, e) => SetUpConfigMenu();
         }
 
@@ -50,11 +54,13 @@ namespace WaterBot
                 Logger.Log("Player provided interrupt signal. Process stopped.");
                 this.bot.stop();
             }
-            else if (e.Button.IsActionButton()) // SButton.MouseRight 
+            else if (Context.IsPlayerFree && !Game1.player.UsingTool
+                && Game1.player.toolOverrideFunction == null && e.Button.IsActionButton())
             {
                 if (this.isWateringHoedDirt())
                 {
                     Logger.Log("Player provided trigger to begin bot.");
+                    this.Helper.Input.Suppress(e.Button);
                     this.bot?.start(this.console);
                 }
             }
@@ -65,7 +71,7 @@ namespace WaterBot
         /// </summary>
         private bool isWateringHoedDirt()
         {
-            // Is the player using a Watering Can on their Farm?
+            // Start on a growing crop; leave ready-to-harvest crops to the normal action button.
             if (Game1.player?.CurrentItem is WateringCan)
             {
                 // Find action tiles
@@ -84,7 +90,8 @@ namespace WaterBot
                     // If they just watered Hoe Dirt, return true
                     if (Game1.currentLocation?.terrainFeatures.ContainsKey(rounded) == true &&
                         Game1.currentLocation.terrainFeatures[rounded] is HoeDirt dirt &&
-                        dirt.crop != null &&
+                        dirt.crop != null && !dirt.crop.dead.Value &&
+                        Map.tileNeedsWatering((int)rounded.X, (int)rounded.Y) &&
                         ((dirt.crop.fullyGrown.Value &&
                         dirt.crop.dayOfCurrentPhase.Value > 0) || 
                             (dirt.crop.currentPhase.Value < dirt.crop.phaseDays.Count - 1)))

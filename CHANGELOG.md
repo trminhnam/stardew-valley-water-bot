@@ -1,3 +1,14 @@
+# Unreleased
+
+- Prevent duplicate watering and recheck live soil before each tool effect.
+- Target the intended tile explicitly, including with a controller or hidden cursor.
+- Run navigation and tool actions in the game update loop, with verified completion and bounded retries.
+- Stop safely on missing paths, stalled movement, failed animations, and planning errors.
+- Ignore stale tool callbacks after cancellation or restarting; reset on warps, day end, and return to title.
+- Choose reachable standing positions for both grouping modes, including trellises and single groups.
+- Fix map-edge grouping and finish immediately after a completion refill.
+- Report crops left unreachable and preserve normal harvesting when triggering the bot.
+
 # v1.2.1
 
 🐛 Bug Fix

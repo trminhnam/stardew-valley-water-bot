@@ -1,4 +1,4 @@
-﻿using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework;
 using StardewValley;
 using StardewValley.TerrainFeatures;
 
@@ -23,8 +23,7 @@ namespace WaterBot.Framework
 
         private (int Y, int X, Func<int, int, bool> IsInBounds)[] diagonals;
 
-        private Dictionary<Vector2, List<Tile>> neighborDict;
-        private Dictionary<Vector2, List<Tile>> coveredByDict;
+        private readonly HashSet<Tile> reachable = new();
 
         public Map()
         {
@@ -92,7 +91,7 @@ namespace WaterBot.Framework
             if (!Game1.currentLocation.isTileHoeDirt(index))
                 return false;
 
-            if (!Game1.currentLocation.terrainFeatures.TryGetValue(index, out TerrainFeature feature))
+            if (!Game1.currentLocation.terrainFeatures.TryGetValue(index, out TerrainFeature? feature))
                 return false;
 
             if (feature is HoeDirt hoeDirt)
@@ -100,7 +99,7 @@ namespace WaterBot.Framework
                 if (hoeDirt.state.Value != 0)
                     return false;
 
-                Crop crop = hoeDirt.crop;
+                Crop? crop = hoeDirt.crop;
                 if (crop == null || crop.dead.Value)
                     return false;
 
@@ -154,6 +153,18 @@ namespace WaterBot.Framework
 
             this.map = map;
             this.waterableTiles = waterableTiles;
+            this.reachable.Clear();
+            Point start = Game1.player.TilePoint;
+            if (!this.inBounds(start)) return;
+            Queue<Tile> queue = new();
+            Tile startTile = this.map[start.Y][start.X];
+            this.reachable.Add(startTile);
+            queue.Enqueue(startTile);
+            while (queue.Count > 0)
+            {
+                foreach (Tile neighbor in this.getNeighbors(queue.Dequeue(), true))
+                    if (this.reachable.Add(neighbor)) queue.Enqueue(neighbor);
+            }
         }
 
         /// <summary>
@@ -201,229 +212,75 @@ namespace WaterBot.Framework
             return list;
         }
 
-        /// <summary>
-        /// Find all groupings of waterable tiles
-        /// This does create groups based on link, but reach
-        /// </summary>
+        public bool inBounds(Point point) => point.X >= 0 && point.Y >= 0 && point.X < this.width && point.Y < this.height;
+
+        public bool isReachable(Point point) => this.inBounds(point)
+            && !this.map[point.Y][point.X].block && this.reachable.Contains(this.map[point.Y][point.X]);
+
+        private IEnumerable<Tile> standingPlaces(Tile target)
+        {
+            if (this.isReachable(target.getPoint())) yield return target;
+            foreach (var direction in this.directions.Concat(this.diagonals))
+            {
+                Point point = new(target.x + direction.X, target.y + direction.Y);
+                if (this.isReachable(point)) yield return this.map[point.Y][point.X];
+            }
+        }
+
+        public Point? groupStandingPlace(Group group)
+        {
+            if (group.center != null && this.isReachable(group.center.getPoint()))
+                return group.center.getPoint();
+            if (group.Count() == 0) return null;
+            Point center = new((int)group.getList().Average(t => t.x), (int)group.getList().Average(t => t.y));
+            return group.getList().SelectMany(this.standingPlaces).Distinct()
+                .OrderBy(t => t.distanceTo(center)).Select(t => (Point?)t.getPoint()).FirstOrDefault();
+        }
+
+        /// <summary>Choose reachable standing positions which cover all accessible targets.</summary>
         public List<Group> getMinimalCoverGroups()
         {
-            neighborDict = new();
-            coveredByDict = new();
-            // Find Minimal cover groups
-            // 1. Find all groups
-            foreach (var waterableTile in waterableTiles)
+            Group all = new(0);
+            foreach (Tile tile in this.waterableTiles) all.Add(tile);
+            List<ActionableTile> stops = this.findFillPath(all, _ => { });
+            List<Group> groups = new();
+            foreach (ActionableTile stop in stops)
             {
-                var waterableVector = new Vector2(waterableTile.x, waterableTile.y);
-                neighborDict[waterableVector] = new() { waterableTile };
-                foreach (var change in directions.Concat(diagonals))
+                List<Tile> targets = new();
+                while (!stop.isDone())
                 {
-                    if (change.IsInBounds(waterableTile.y + change.Y, waterableTile.x + change.X))
-                    {
-                        var neighborTile = map[waterableTile.y + change.Y][waterableTile.x + change.X];
-                        if (neighborTile.waterable)
-                        {
-                            var neighborVector = new Vector2(neighborTile.x, neighborTile.y);
-                            neighborDict[waterableVector].Add(neighborTile);
-                            if (coveredByDict.TryGetValue(neighborVector, out var coverList))
-                            {
-                                coverList.Add(waterableTile);
-                            }
-                            else
-                            {
-                                coveredByDict[neighborVector] = new() { waterableTile };
-                            }
-                        }
-                    }
+                    Point target = stop.Pop();
+                    targets.Add(this.map[target.Y][target.X]);
                 }
+                Point stand = stop.getStand();
+                groups.Add(new Group(groups.Count, this.map[stand.Y][stand.X], targets));
             }
-            Dictionary<Tile, List<Tile>> groups = new();
-            var lonelyTiles = waterableTiles.Where(tile => !coveredByDict.ContainsKey(new Vector2(tile.x, tile.y))).ToArray();
-            foreach (var tile in lonelyTiles)
-            {
-                groups.Add(tile, new() { tile });
-                neighborDict.Remove(new Vector2(tile.x, tile.y));
-            }
-            while (neighborDict.Count > 0)
-            {
-                // 2.  Remove shadowed groups
-                var freedUpList = new List<Vector2>();
-                foreach (var tilePair in neighborDict)
-                {
-                    var tileVector = tilePair.Key;
-                    var neighbors = tilePair.Value;
-                    if (neighbors!.Count == 9) continue;
-                    var tile = neighbors.Find(neighbor => new Vector2(neighbor.x, neighbor.y) == tileVector);
-                    var isInShadow = neighbors.Any(neighbor => neighbor != tile && neighborDict.TryGetValue(new Vector2(neighbor.x, neighbor.y), out var featureList) && featureList.Intersect(neighbors).Count() == neighbors.Count);
-                    if (isInShadow || neighbors.Count == 0)
-                    {
-                        foreach (var neighbor in neighbors)
-                        {
-                            var neighborVector = new Vector2(neighbor.x, neighbor.y);
-                            coveredByDict[neighborVector].Remove(tile);
-                        }
-                        freedUpList.Add(tileVector);
-                        neighborDict.Remove(tileVector);
-                    }
-                }
-                // 3. Pick all groups with uniques
-                var currentGroupCount = groups.Count;
-                pickUniques(groups, freedUpList);
-
-                // 4. Prevent stalemate
-                if (currentGroupCount == groups.Count)
-                {
-                    pickUniques(groups, freedUpList, 2);
-                    if (currentGroupCount == groups.Count) break; // Should not be necessary
-                }
-            }
-            return groups.Select((pair, i) => new Group(i, pair.Key, pair.Value)).ToList();
+            // findFillPath uses these as scheduling flags; the controller plans each group later.
+            foreach (Tile tile in this.waterableTiles) tile.watered = false;
+            return groups;
         }
 
-        private void pickUniques(Dictionary<Tile, List<Tile>> groups, List<Vector2> freedUpList, int threshold = 1)
-        {
-            foreach (var freedUp in freedUpList)
-            {
-                var foundCover = coveredByDict.TryGetValue(freedUp, out var covers);
-                if (foundCover && covers.Count == threshold && !neighborDict.ContainsKey(freedUp))
-                {
-                    foreach (var groupCenter in covers)
-                    {
-                        var waterableVector = new Vector2(groupCenter.x, groupCenter.y);
-                        var isInPlay = neighborDict.TryGetValue(waterableVector, out var neighbors);
-                        if (!isInPlay || neighbors.Count == 0) continue;
-                        removeAllAsNeighbors(neighbors);
-                        groups.Add(groupCenter, neighbors);
-                        neighborDict.Remove(waterableVector);
-                    }
-                }
-            }
-        }
-
-
-        private void removeAllAsNeighbors(List<Tile> tiles)
-        {
-            foreach (var tile in tiles)
-            {
-                var waterableVector = new Vector2(tile.x, tile.y);
-                if (coveredByDict.TryGetValue(waterableVector, out var coverteeList))
-                {
-                    foreach (var covertee in coverteeList)
-                    {
-                        if (neighborDict.TryGetValue(new Vector2(covertee.x, covertee.y), out var coverteeNeighbors))
-                        {
-                            neighborDict[new Vector2(covertee.x, covertee.y)] = coverteeNeighbors.Where(x => x != tile).ToList();
-                        }
-                    }
-                }
-            }
-        }
-
-        /// <summary>
-        /// Find all groupings of waterable tiles
-        /// </summary>
-        /// 
-        /// <param name="console">Function for printing to debug console.</param>
+        /// <summary>Find side-connected crops, without recursion or special edge indexing.</summary>
         public List<Group> findGroupings(console console)
         {
-            var groupings = new List<Group>();
-
+            List<Group> groups = new();
+            HashSet<Tile> visited = new();
             foreach (Tile tile in this.waterableTiles)
             {
-                bool grouped = false;
-
-                if (tile.visited)
+                if (!visited.Add(tile)) continue;
+                Group group = new(groups.Count);
+                Stack<Tile> stack = new();
+                stack.Push(tile);
+                while (stack.Count > 0)
                 {
-                    continue;
+                    Tile current = stack.Pop();
+                    group.Add(current);
+                    foreach (Tile neighbor in this.getNeighbors(current, checkWaterable: true))
+                        if (visited.Add(neighbor)) stack.Push(neighbor);
                 }
-
-                int index = groupings.Count;
-
-                if (tile.x <= this.width - 1)
-                {
-                    Tile neighbor = this.map[tile.y][tile.x + 1];
-                    if (neighbor.waterable)
-                    {
-                        grouped = true;
-                        Group group = new Group(index);
-                        this.populateGroup(group, tile);
-                        groupings.Add(group);
-                    }
-                }
-                if (tile.y <= this.height - 1 && !grouped)
-                {
-                    Tile neighbor = this.map[tile.y + 1][tile.x];
-                    if (neighbor.waterable)
-                    {
-                        grouped = true;
-                        Group group = new Group(index);
-                        this.populateGroup(group, tile);
-                        groupings.Add(group);
-                    }
-                }
-                if (!grouped)
-                {
-                    Group solo = new Group(index);
-
-                    solo.Add(tile);
-                    tile.visited = true;
-
-                    groupings.Add(solo);
-                }
+                groups.Add(group);
             }
-            return groupings;
-        }
-
-        /// <summary>
-        /// Recursively find connected waterable tiles (depth-first search)
-        /// </summary>
-        /// 
-        /// <param name="group">List of tiles so far.</param>
-        /// <param name="tile">New tile added.</param>
-        public void populateGroup(Group group, Tile tile)
-        {
-            // Add the tile and mark it as visted
-            group.Add(tile);
-            tile.visited = true;
-
-            // Check edge cases
-            bool leftBorder = tile.x == 0;
-            bool rightBorder = tile.x == this.width - 1;
-            bool topBorder = tile.y == 0;
-            bool bottomBorder = tile.y == this.height - 1;
-
-            // Recursively check neighbors
-            if (!leftBorder)
-            {
-                Tile neighbor = this.map[tile.y][tile.x - 1];
-                if (neighbor.waterable && neighbor.visited == false)
-                {
-                    this.populateGroup(group, neighbor);
-                }
-            }
-            if (!rightBorder)
-            {
-                Tile neighbor = this.map[tile.y][tile.x + 1];
-                if (neighbor.waterable && neighbor.visited == false)
-                {
-                    this.populateGroup(group, neighbor);
-                }
-            }
-            if (!topBorder)
-            {
-                Tile neighbor = this.map[tile.y - 1][tile.x];
-                if (neighbor.waterable && neighbor.visited == false)
-                {
-                    this.populateGroup(group, neighbor);
-                }
-            }
-            if (!bottomBorder)
-            {
-                Tile neighbor = this.map[tile.y + 1][tile.x];
-                if (neighbor.waterable && neighbor.visited == false)
-                {
-                    this.populateGroup(group, neighbor);
-                }
-            }
+            return groups;
         }
 
         public Tile findClosestWalkableTile(Tile center)
@@ -561,13 +418,7 @@ namespace WaterBot.Framework
         /// <param name="console">Function for printing to debug console.</param>
         public int[,] generateCostMatrix(console console, List<Group> groupings)
         {
-            foreach (Group group in groupings)
-            {
-                if (group.Count() == 0)
-                {
-                    groupings.Remove(group);
-                }
-            }
+            groupings.RemoveAll(group => group.Count() == 0 || this.groupStandingPlace(group) == null);
 
             int nodes = groupings.Count + 1;
 
@@ -656,11 +507,6 @@ namespace WaterBot.Framework
         {
             try
             {
-                if (groupings.Count == 1)
-                {
-                    return groupings;
-                }
-
                 List<Group> path = new List<Group>();
 
                 int[,] costMatrix = this.generateCostMatrix(console, groupings);
@@ -711,182 +557,55 @@ namespace WaterBot.Framework
                 }
 
                 return path;
-            } catch (IndexOutOfRangeException e)
+            } catch (IndexOutOfRangeException)
             {
                 console("WaterBot encountered an error and will return a sub-optimal path.");
                 return groupings;
-            } catch (Exception e)
+            } catch (Exception)
             {
                 console("WaterBot encountered an unknown error and will return a sub-optimal path.");
                 return groupings;
             }
         }
 
-        /// <summary>
-        /// Finds path in group through adjacent tiles
-        /// </summary>
-        /// 
-        /// <param name="group">Group of crops to find path through.</param>
+        /// <summary>Plan each target once, using only reachable standing positions.</summary>
         public List<ActionableTile> findFillPath(Group group, console console)
         {
-            if (group.center is not null)
+            HashSet<Tile> pending = group.getList().Where(t => t.waterable && !t.watered).ToHashSet();
+            List<ActionableTile> stops = new();
+            if (group.center != null && this.isReachable(group.center.getPoint())
+                && pending.All(t => Math.Abs(t.x - group.center.x) <= 1 && Math.Abs(t.y - group.center.y) <= 1))
             {
-                return new List<ActionableTile> { new ActionableTile(group.center.getPoint(), group.getList().Select(x => x.getPoint()).ToList(), ActionableTile.Action.Water) };
-            }
-            // Start a new path of actionable tiles
-            // Actionable tiles are a standing place, and nearby tiles to water
-            List<ActionableTile> path = new List<ActionableTile>();
-
-            // Reset the visited values of each tile in group.
-            foreach (Tile tile in group.getList())
-            {
-                this.map[tile.y][tile.x].reset();
-            }
-
-            // Queue for depth first search
-            List<Tile> stack = new List<Tile>();
-            stack.Add(group.findClosestTile(Game1.player.TilePoint.X, Game1.player.TilePoint.Y).Item1);
-
-            bool keepGoing;
-            do
-            {
-                keepGoing = false;
-
-                while (stack.Count > 0)
+                if (pending.Count > 0)
                 {
-                    Tile current = stack[stack.Count - 1];
-                    stack.RemoveAt(stack.Count - 1);
-
-                    if (current.visited)
-                    {
-                        continue;
-                    }
-                    else if (current.watered)
-                    {
-                        current.visited = true;
-
-                        foreach (var direction in this.directions)
-                        {
-                            if (direction.IsInBounds(current.y + direction.Y, current.x + direction.X))
-                            {
-                                Tile neighbor = this.map[current.y + direction.Y][current.x + direction.X];
-                                if (!neighbor.visited && group.Contains(neighbor))
-                                {
-                                    stack.Add(neighbor);
-                                }
-                            }
-                        }
-                    }
-                    else
-                    {
-                        // Start a new action
-                        ActionableTile actionable = new ActionableTile(ActionableTile.Action.Water);
-                        current.visited = true;
-
-                        if (current.block)
-                        {
-                            int score = 0;
-                            Tile bestOption = this.map[current.y][current.x];
-
-                            // If you can stand on adjacents, do it.
-                            foreach (var direction in this.directions.Concat(this.diagonals))
-                            {
-                                if (direction.IsInBounds(current.y + direction.Y, current.x + direction.X))
-                                {
-                                    Tile neighbor = this.map[current.y + direction.Y][current.x + direction.X];
-                                    if (neighbor.block)
-                                    {
-                                        continue;
-                                    }
-
-                                    int neighborScore = 0;
-
-                                    if (group.Contains(neighbor)) neighborScore += 5;
-                                    if (neighbor.waterable) neighborScore += 5;
-                                    if (!neighbor.watered) neighborScore += 5;
-                                    if (!neighbor.visited) neighborScore += 5;
-
-                                    if (neighborScore > score)
-                                    {
-                                        bestOption = neighbor;
-                                    }
-                                }
-                            }
-
-                            if (bestOption == null)
-                            {
-                                continue;
-                            }
-
-                            // Set possible standing point.
-                            actionable.setStand(bestOption.getPoint());
-                        }
-                        else
-                        {
-                            // Set this as standing position
-                            actionable.setStand(current.getPoint());
-                        }
-
-                        // Water here
-                        if (current.getPoint() == actionable.getStand())
-                        {
-                            actionable.pushExecuteOn(current.getPoint());
-                            current.watered = true;
-                        }
-                        else if (this.map[actionable.getStand().Y][actionable.getStand().X].waterable && !this.map[actionable.getStand().Y][actionable.getStand().X].watered)
-                        {
-                            actionable.pushExecuteOn(actionable.getStand());
-                            this.map[actionable.getStand().Y][actionable.getStand().X].watered = true;
-                        }
-
-                        // If you can water adjacents, do it.
-                        foreach (var direction in this.directions)
-                        {
-                            if (direction.IsInBounds(actionable.getStand().Y + direction.Y, actionable.getStand().X + direction.X))
-                            {
-                                Tile neighbor = this.map[actionable.getStand().Y + direction.Y][actionable.getStand().X + direction.X];
-                                if (neighbor.waterable && !neighbor.watered)
-                                {
-                                    actionable.pushExecuteOn(neighbor.getPoint());
-                                    neighbor.watered = true;
-                                }
-                                if (!neighbor.visited && group.Contains(neighbor))
-                                {
-                                    stack.Add(neighbor);
-                                }
-                            }
-                        }
-
-                        // If you can water diagonals, do it.
-                        foreach (var direction in this.diagonals)
-                        {
-                            if (direction.IsInBounds(actionable.getStand().Y + direction.Y, actionable.getStand().X + direction.X))
-                            {
-                                Tile neighbor = this.map[actionable.getStand().Y + direction.Y][actionable.getStand().X + direction.X];
-                                if (neighbor.waterable && !neighbor.watered)
-                                {
-                                    actionable.pushExecuteOn(neighbor.getPoint());
-                                    neighbor.watered = true;
-                                }
-                            }
-                        }
-
-                        path.Add(actionable);
-                    }
+                    stops.Add(new ActionableTile(group.center.getPoint(), pending.Select(t => t.getPoint()).ToList(), ActionableTile.Action.Water));
+                    foreach (Tile tile in pending) tile.watered = true;
                 }
-
-                foreach (Tile tile in group.getList())
+                return stops;
+            }
+            Point position = Game1.player.TilePoint;
+            while (pending.Count > 0)
+            {
+                Tile target = pending.OrderBy(t => t.distanceTo(position)).First();
+                Tile? stand = this.standingPlaces(target)
+                    .OrderByDescending(candidate => pending.Count(t => Math.Abs(t.x - candidate.x) <= 1 && Math.Abs(t.y - candidate.y) <= 1))
+                    .ThenBy(candidate => candidate.distanceTo(position)).FirstOrDefault();
+                if (stand == null)
                 {
-                    if (!tile.visited)
-                    {
-                        stack.Add(tile);
-                        keepGoing = true;
-                        break;
-                    }
+                    console($"No reachable standing position for crop {target.getPoint()}. Skipping it.");
+                    pending.Remove(target);
+                    continue;
                 }
-            } while (keepGoing);
-
-            return path;
+                List<Tile> covered = pending.Where(t => Math.Abs(t.x - stand.x) <= 1 && Math.Abs(t.y - stand.y) <= 1).ToList();
+                stops.Add(new ActionableTile(stand.getPoint(), covered.Select(t => t.getPoint()).ToList(), ActionableTile.Action.Water));
+                foreach (Tile tile in covered)
+                {
+                    pending.Remove(tile);
+                    tile.watered = true; // Scheduled, not confirmed watered. waterable tracks confirmed progress.
+                }
+                position = stand.getPoint();
+            }
+            return stops;
         }
 
         /// <summary>
@@ -926,7 +645,7 @@ namespace WaterBot.Framework
 
                     if (current.block)
                     {
-                        return new ActionableTile(last.getPoint(), actions, ActionableTile.Action.Refill);
+                        return new ActionableTile((last ?? start).getPoint(), actions, ActionableTile.Action.Refill);
                     }
                     else
                     {
