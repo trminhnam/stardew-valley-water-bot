@@ -58,6 +58,21 @@ Snap out of it early by pressing any button.
 
 Don't worry, you won't knock yourself out from watering, you will stop before you run out of stamina
 
+With an upgraded watering can, the bot charges it like you would (holding for 0.6 s per level) and waters whole lines and squares of crops at once wherever that saves stamina. It can even water trellis rows from the end and crops behind a fence.
+
+## Settings
+
+With [Generic Mod Config Menu](https://www.nexusmods.com/stardewvalley/mods/5098) installed, these can be changed in game; otherwise edit `config.json`.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `UseChargedWatering` | `true` | Use an upgraded can's lines and squares. Off: one tile at a time. |
+| `InstantCharge` | `false` | Skip the hold time when charging. |
+| `Optimize` | `Stamina` | `Stamina`: least stamina per crop. `Speed`: least time per crop. |
+| `RefillOnFinish` | `false` | Refill the can at the end of a run. |
+| `RefillIfLower` | `95` | With `RefillOnFinish`, only refill below this percentage. |
+| `RedoPathOnRefill` | `false` | Plan the route again after each refill. |
+
 # Implementation
 
 ### 1. Trigger
@@ -92,23 +107,24 @@ For the image above, the tiles are colors accordingly:
 
 A breadth-first search from the player marks every tile the player can walk to. Every step costs the same, so this also gives the exact walking distance to each tile, going around fences, buildings and trellis crops.
 
-The bot then plans the whole run in one pass:
+The bot then plans the run in two steps:
 
-1. From the current position, find the nearest crop that needs water, measured by walking distance to the closest tile it can be watered from (the crop's own tile or any of its 8 neighbors).
-2. Of the tiles that can water that crop, stand on the one that reaches the most remaining crops. In rows separated by a 1-tile path, that is the path, which waters up to 6 crops per stop.
-3. Queue every remaining crop in reach of that tile, once, then repeat from there.
+1. **Choose the can uses.** It lists every way to water each dry crop: one tile at a time from any reachable tile next to it, and, with an upgraded can, every charged pattern (1×3 and 1×5 lines, 3×3, 3×6 and with Reaching 5×5) in every direction that includes it. Patterns reach over fences and trellises; they never start on a water tile, because the game would refill the can instead. It then repeatedly takes the use that waters the most still-dry crops per stamina point, so big patterns are used where they're full and smaller ones or single tiles for the leftovers.
+2. **Order the stops** by real walking distance: nearest stop next, then a 2-opt pass that removes crossings.
 
-Crops with no reachable tile to water them from are skipped and reported when the run ends.
+A charged pattern never waters the tile the farmer stands on. If that tile is a dry crop, it gets a single-tile watering at the same stop.
 
-Planning a farm of 480 crops takes well under a tenth of a second.
+Crops nothing can reach are skipped and reported when the run ends. Planning a farm of 480 crops takes about 0.1–0.2 s.
 
 ### 4. Watering
 
 Each crop is queued once, and the bot checks the live soil again before using the can, so crops already watered by another player or action are skipped.
 
-Watering uses the normal can effect and animation, with an explicit target tile. The bot waits for animation completion and checks the result before advancing. Failed effects are retried once; missing paths, stalled movement, and repeated tool failures stop the run with a message and details in the SMAPI log.
+Watering uses the normal can animation and charging effects, with an explicit target tile and charge level. The bot waits for the animation to finish and checks every target crop afterwards. A crop that is still dry is tried once more, then skipped and reported at the end, and the run carries on. Missing paths, stalled movement and other problems that affect the whole run stop it with a message and details in the SMAPI log.
 
-The bot never waters at 2 stamina or less, so you can't be knocked out. Walking and refilling cost no stamina.
+**Stamina.** Watering costs `2 × (charge level + 1) − 0.1 × farming level` (nothing with the Efficient enchantment). The bot rounds that cost up and your stamina down, as the energy bar shows it, and only waters if at least 1 whole point is left afterwards, so you can't be knocked out. When stamina runs low it plans the rest with smaller patterns before stopping. Walking and refilling cost no stamina.
+
+**Water.** A charged use takes `charge level + 1` water. The bot refills before any use that needs more than is left.
 
 ### 5. Out of Water!
 

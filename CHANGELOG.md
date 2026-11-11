@@ -11,6 +11,11 @@
 - Never water at 2 stamina or less; walking and refilling are not limited by stamina.
 - Plan the whole farm in one pass using real walking distances: no more multi-second freezes on large farms, and about half the walking of the old default mode.
 - Remove the "Use small grouping" option; the single planner replaces both modes.
+- Upgraded watering cans: charge like a player and water lines (1×3, 1×5), squares (3×3), 3×6 and 5×5 (Reaching) where that saves stamina, including trellis rows from the end and crops behind fences.
+- Stamina checks round the cost up and current stamina down; low stamina lowers the charge level before the bot stops.
+- Refill before any charged use that needs more water than is left.
+- A crop that stays dry is retried once, then skipped and reported; the run no longer stops for it.
+- New settings: "Use charged watering", "Instant charge", "Optimize for" (Stamina or Speed).
 
 # v1.2.1
 

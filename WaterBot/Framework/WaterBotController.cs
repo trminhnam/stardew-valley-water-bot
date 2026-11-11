@@ -9,21 +9,25 @@ namespace WaterBot.Framework
     /// <summary>Runs navigation and tool use exclusively from the game's update loop.</summary>
     class WaterBotController
     {
-        private enum State { Idle, Planning, Ready, Moving, UsingTool }
+        private enum State { Idle, Planning, Ready, Moving, Charging, UsingTool }
 
-        /// <summary>Watering costs up to 2 stamina, so never water at or below this.
-        /// Watering at 2 or 1 could reach 0 or less, which exhausts the farmer.
-        /// Walking and refilling cost no stamina and are not limited by it.</summary>
-        private const float MinStamina = 2f;
+        /// <summary>Animation frames per facing direction for the watering can (Tool.beginUsing).</summary>
+        private static readonly int[] chargeFrames = { 180, 172, 164, 188 };
 
         private readonly IModHelper helper;
         private State state;
         public bool active => this.state != State.Idle;
+
+        /// <summary>Whether the farmer is currently holding the can to charge it.</summary>
+        public bool charging => this.state == State.Charging;
         private Map map = new();
-        /// <summary>The whole run's watering stops, in walking order.</summary>
-        private List<ActionableTile> stops = new();
-        private int currentStop;
-        private ActionableTile? refillStation;
+        private CanProfile profile = new();
+
+        /// <summary>The whole run's can uses, in walking order.</summary>
+        private List<WaterAction> actions = new();
+        private int currentAction;
+        private WaterAction? refillAction;
+        private WaterAction? activeAction;
         private bool finishingRefill;
         private console? console;
         private Farmer? farmer;
@@ -33,14 +37,25 @@ namespace WaterBot.Framework
         private AnimatedSprite.endOfAnimationBehavior? toolEffect;
         private long runId;
         private Point destination;
-        private Point target;
         private Vector2 lastPosition;
         private int stalledTicks;
         private int toolTicks;
+        private int chargeTicks;
+        private int chargeTotalTicks;
         private bool effectApplied;
+
+        /// <summary>Failed attempts per crop. A crop that fails twice is skipped and reported at the end.</summary>
         private readonly Dictionary<Point, int> attempts = new();
+        private readonly HashSet<Point> skipped = new();
+        private int refillFailures;
 
         public WaterBotController(IModHelper helper) => this.helper = helper;
+
+        private static Planner.Options planOptions() => new()
+        {
+            OptimizeSpeed = string.Equals(WaterBot.config.Optimize, "Speed", StringComparison.OrdinalIgnoreCase),
+            InstantCharge = WaterBot.config.InstantCharge,
+        };
 
         public void start(console console, bool showMessage = true)
         {
@@ -48,7 +63,7 @@ namespace WaterBot.Framework
             if (!Context.IsWorldReady || Game1.player.CurrentTool is not WateringCan wateringCan
                 || Game1.player.UsingTool || Game1.player.toolOverrideFunction != null)
                 return;
-            if (Game1.player.Stamina <= MinStamina)
+            if (!CanProfile.Read(Game1.player, wateringCan, WaterBot.config.UseChargedWatering).CanAfford(Game1.player.Stamina, 0))
             {
                 this.message("process.exhausted", 3);
                 return;
@@ -59,11 +74,13 @@ namespace WaterBot.Framework
             this.location = Game1.currentLocation;
             this.can = wateringCan;
             this.attempts.Clear();
+            this.skipped.Clear();
+            this.refillFailures = 0;
             this.state = State.Planning;
             this.guarded(() =>
             {
                 this.plan();
-                if (this.stops.Count == 0)
+                if (this.actions.Count == 0)
                 {
                     this.finish();
                     return;
@@ -73,13 +90,15 @@ namespace WaterBot.Framework
             });
         }
 
+        /// <summary>(Re)plan every crop that still needs water, from where the farmer stands, with current stamina.</summary>
         private void plan()
         {
             this.map = new Map();
             this.map.loadMap();
-            this.stops = this.map.planStops(this.console!);
-            this.currentStop = 0;
-            this.refillStation = null;
+            this.profile = CanProfile.Read(this.farmer!, this.can!, WaterBot.config.UseChargedWatering);
+            this.actions = Planner.Plan(this.map, this.profile, this.farmer!.Stamina, planOptions(), this.console!, this.farmer.TilePoint, this.skipped);
+            this.currentAction = 0;
+            this.refillAction = null;
             this.finishingRefill = false;
         }
 
@@ -94,30 +113,42 @@ namespace WaterBot.Framework
                     this.cancel();
                     return;
                 }
-                // Paused/menu time must not consume movement or animation timeouts.
+                // Paused/menu time must not consume movement, charge, or animation timeouts.
                 if (Game1.activeClickableMenu != null || !Game1.shouldTimePass()) return;
 
                 switch (this.state)
                 {
                     case State.Ready: this.advance(); break;
                     case State.Moving: this.checkMovement(); break;
+                    case State.Charging: this.checkCharge(); break;
                     case State.UsingTool: this.checkTool(); break;
                 }
             });
         }
 
+        private bool needsWater(Point tile) => !this.skipped.Contains(tile) && Map.tileNeedsWatering(tile.X, tile.Y);
+
         private void advance()
         {
             if (this.farmer!.UsingTool) return;
-            if (this.refillStation != null)
+            if (this.refillAction != null)
             {
-                this.useNext(this.refillStation);
+                this.useNext(this.refillAction);
                 return;
             }
-            while (this.currentStop < this.stops.Count && this.stops[this.currentStop].isDone())
-                this.currentStop++;
-            if (this.currentStop >= this.stops.Count)
+
+            // Skip uses whose crops are already wet (watered by another use, a sprinkler, or another player).
+            while (this.currentAction < this.actions.Count && !this.actions[this.currentAction].Targets.Any(this.needsWater))
+                this.currentAction++;
+            if (this.currentAction >= this.actions.Count)
             {
+                // Nothing left that stamina allows, but crops still need water: say why we stopped.
+                if (!CanProfile.Read(this.farmer, this.can!, WaterBot.config.UseChargedWatering).CanAfford(this.farmer.Stamina, 0)
+                    && this.map.waterableTiles.Any(t => this.needsWater(t.getPoint())))
+                {
+                    this.exhausted();
+                    return;
+                }
                 if (WaterBot.config.RefillOnFinish && !this.can!.IsBottomless && !this.farmer.hasWateringCanEnchantment
                     && this.can.WaterLeft < this.can.waterCanMax
                     && this.can.WaterLeft < this.can.waterCanMax * Math.Clamp(WaterBot.config.RefillIfLower, 0, 100) / 100f)
@@ -126,36 +157,50 @@ namespace WaterBot.Framework
                     this.finish();
                 return;
             }
-            ActionableTile stop = this.stops[this.currentStop];
-            if (this.can!.WaterLeft <= 0 && !this.farmer.hasWateringCanEnchantment)
+
+            WaterAction next = this.actions[this.currentAction];
+            this.profile = CanProfile.Read(this.farmer, this.can!, WaterBot.config.UseChargedWatering);
+
+            // Stamina is checked before walking to a watering, at the charge level about to be used.
+            bool affordable = this.profile.CanAfford(this.farmer.Stamina, next.Power);
+            bool canWaterAtAll = this.profile.CanAfford(this.farmer.Stamina, 0);
+            if (!affordable && canWaterAtAll)
+            {
+                this.plan(); // re-plan the rest with the charge levels still affordable
+                return;
+            }
+
+            // Water: refill first if this use needs more than is left. Refilling costs no stamina,
+            // so it isn't blocked by stamina (the bot then stops before the next watering if tired).
+            if (!this.profile.Unlimited && this.can!.WaterLeft < this.profile.WaterUse(next.Power))
             {
                 this.refill(false);
                 return;
             }
-            this.useNext(stop);
-        }
 
-        private void useNext(ActionableTile stop)
-        {
-            // Only watering costs stamina; walking and refilling do not. A tired farmer can't
-            // water anything at a watering stop, so stop here instead of walking to it first.
-            if (stop.getAction() == ActionableTile.Action.Water && this.tooTired())
+            if (!affordable)
             {
                 this.exhausted();
                 return;
             }
-            if (this.farmer!.TilePoint != stop.getStand())
+            this.useNext(next);
+        }
+
+        private void useNext(WaterAction action)
+        {
+            if (this.farmer!.TilePoint != action.Stand)
             {
-                this.moveTo(stop.getStand());
+                this.moveTo(action.Stand);
                 return;
             }
-            Point next = stop.Pop();
-            if (next.X == -1) return;
-            if (stop.getAction() == ActionableTile.Action.Water && !Map.tileNeedsWatering(next.X, next.Y))
-                return; // Another stop, sprinkler, or player may already have watered this crop.
-            if (Math.Abs(next.X - this.farmer.TilePoint.X) > 1 || Math.Abs(next.Y - this.farmer.TilePoint.Y) > 1)
-                throw new InvalidOperationException($"Target {next} is outside watering range.");
-            this.beginTool(next);
+            if (action.Action == WaterAction.Kind.Water && action.Power == 0
+                && (Math.Abs(action.Origin.X - action.Stand.X) > 1 || Math.Abs(action.Origin.Y - action.Stand.Y) > 1))
+                throw new InvalidOperationException($"Target {action.Origin} is outside watering range.");
+
+            if (action.Action == WaterAction.Kind.Water && action.Power > 0 && !WaterBot.config.InstantCharge)
+                this.beginCharge(action);
+            else
+                this.release(action);
         }
 
         private void moveTo(Point stand)
@@ -197,57 +242,116 @@ namespace WaterBot.Framework
         {
             this.finishingRefill = finishing;
             Point player = this.farmer!.TilePoint;
-            this.refillStation = this.map.getClosestRefill(this.map.map[player.Y][player.X], this.console!);
-            if (this.refillStation == null)
+            this.refillAction = this.map.getClosestRefill(this.map.map[player.Y][player.X], this.console!);
+            if (this.refillAction == null)
             {
                 this.cancel();
                 this.message("process.waterless", 3);
             }
         }
 
-        private void beginTool(Point point)
+        /// <summary>
+        /// Hold the can like a player would: face the target, then raise the charge one level per
+        /// 600 ms × AnimationSpeedModifier using the game's own Farmer.toolPowerIncrease (sound, flash, shake).
+        /// </summary>
+        private void beginCharge(WaterAction action)
         {
             Farmer player = this.farmer!;
-            WateringCan tool = this.can!;
-            GameLocation currentLocation = this.location!;
             if (player.toolOverrideFunction != null)
                 throw new InvalidOperationException("Another tool action is already in progress.");
-            this.target = point;
-            this.effectApplied = false;
-            this.toolTicks = 0;
+            this.activeAction = action;
+            // While charging, the game may still end the tool use itself (e.g. an event starts). Its
+            // Farmer.useTool would then water wherever the mouse points at the charged level, so hook it
+            // and stop the run instead.
             long id = this.runId;
-            bool watering = this.refillStation == null;
-            // The vanilla animation invokes Farmer.useTool. Its default targeting can ignore
-            // lastClick with a controller/hidden cursor, so supply the exact tile at that moment.
             this.toolEffect = who => this.guarded(() =>
             {
-                if (id != this.runId || this.state != State.UsingTool || this.effectApplied) return;
-                if (who != player || who.currentLocation != currentLocation || who.CurrentTool != tool)
-                    throw new InvalidOperationException("Player, location, or tool changed during watering.");
-                // Last check before watering spends stamina; checkTool reports exhaustion once the
-                // animation ends. Refilling costs no stamina, so it is never blocked here.
-                if (watering && who.Stamina <= MinStamina) return;
-                this.effectApplied = true;
-                if (watering && !Map.tileNeedsWatering(point.X, point.Y)) return;
-                float stamina = who.Stamina;
-                who.toolPower.Value = 0;
-                tool.DoFunction(currentLocation, point.X * Game1.tileSize + Game1.tileSize / 2,
-                    point.Y * Game1.tileSize + Game1.tileSize / 2, 0, who);
-                who.checkForExhaustion(stamina);
+                if (id == this.runId && this.state == State.Charging)
+                    throw new InvalidOperationException("The game ended the tool use while charging.");
             });
             player.toolOverrideFunction = this.toolEffect;
-            player.FacingDirection = point.Y < player.TilePoint.Y ? 0 : point.Y > player.TilePoint.Y ? 2
-                : point.X < player.TilePoint.X ? 3 : 1;
+            player.FacingDirection = action.Facing;
             player.FarmerSprite.SetOwner(player);
             player.Halt();
             player.CanMove = false;
             player.UsingTool = true;
             player.canReleaseTool = false;
             player.toolPower.Value = 0;
-            player.lastClick = new Vector2(point.X * Game1.tileSize + Game1.tileSize / 2,
-                point.Y * Game1.tileSize + Game1.tileSize / 2);
+            player.jitterStrength = 0.25f;
+            player.FarmerSprite.setCurrentFrame(chargeFrames[action.Facing]);
+            this.can!.Update(action.Facing, 0, player);
+            this.chargeTicks = 0;
+            this.chargeTotalTicks = 0;
+            this.state = State.Charging;
+        }
+
+        private void checkCharge()
+        {
+            WaterAction action = this.activeAction!;
+            int limit = action.Power * this.profile.ChargeTicksPerLevel + 120;
+            if (++this.chargeTotalTicks > limit)
+                throw new InvalidOperationException("Charging did not finish in time.");
+            if (this.farmer!.FacingDirection != action.Facing)
+                throw new InvalidOperationException("Facing changed while charging.");
+            if (++this.chargeTicks >= this.profile.ChargeTicksPerLevel)
+            {
+                this.chargeTicks = 0;
+                this.farmer.toolPowerIncrease();
+            }
+            if (this.farmer.toolPower.Value >= action.Power)
+                this.release(action);
+        }
+
+        /// <summary>
+        /// Play the game's watering animation. Its Farmer.useTool callback runs toolOverrideFunction,
+        /// which applies the can at the planned origin and charge level (docs/game-mechanics.md).
+        /// </summary>
+        private void release(WaterAction action)
+        {
+            Farmer player = this.farmer!;
+            WateringCan tool = this.can!;
+            GameLocation currentLocation = this.location!;
+            this.releaseToolEffect(); // the charging guard, if any
+            if (player.toolOverrideFunction != null)
+                throw new InvalidOperationException("Another tool action is already in progress.");
+            this.activeAction = action;
+            this.effectApplied = false;
+            this.toolTicks = 0;
+            long id = this.runId;
+            bool watering = action.Action == WaterAction.Kind.Water;
+            int power = watering ? action.Power : 0;
+            int facing = action.Facing >= 0 ? action.Facing : player.FacingDirection;
+            CanProfile profile = this.profile;
+            this.toolEffect = who => this.guarded(() =>
+            {
+                if (id != this.runId || this.state != State.UsingTool || this.effectApplied) return;
+                if (who != player || who.currentLocation != currentLocation || who.CurrentTool != tool)
+                    throw new InvalidOperationException("Player, location, or tool changed during watering.");
+                // Last stamina check before it's spent. Refilling costs none, so it's never blocked.
+                if (watering && !profile.CanAfford(who.Stamina, power)) return;
+                this.effectApplied = true;
+                if (watering && !action.Targets.Any(this.needsWater)) return;
+                float stamina = who.Stamina;
+                // The pattern points the way the farmer faces (Tool.tilesAffected), so make sure it's the planned way.
+                who.FacingDirection = facing;
+                who.toolPower.Value = power;
+                tool.DoFunction(currentLocation, action.Origin.X * Game1.tileSize + Game1.tileSize / 2,
+                    action.Origin.Y * Game1.tileSize + Game1.tileSize / 2, power, who);
+                who.toolPower.Value = 0;
+                who.checkForExhaustion(stamina);
+            });
+            player.toolOverrideFunction = this.toolEffect;
+            player.FacingDirection = facing;
+            player.FarmerSprite.SetOwner(player);
+            player.Halt();
+            player.CanMove = false;
+            player.UsingTool = true;
+            player.canReleaseTool = false;
+            player.toolPower.Value = power;
+            player.lastClick = new Vector2(action.Origin.X * Game1.tileSize + Game1.tileSize / 2,
+                action.Origin.Y * Game1.tileSize + Game1.tileSize / 2);
             this.state = State.UsingTool;
-            tool.Update(player.FacingDirection, 0, player);
+            tool.Update(facing, 0, player);
             tool.endUsing(currentLocation, player);
         }
 
@@ -257,43 +361,65 @@ namespace WaterBot.Framework
                 throw new InvalidOperationException("Watering animation did not complete within five seconds.");
             if (this.farmer!.UsingTool) return;
             this.releaseToolEffect();
-            bool refilling = this.refillStation != null;
-            bool success = this.effectApplied && (refilling
-                ? this.can!.WaterLeft >= this.can.waterCanMax
-                : !Map.tileNeedsWatering(this.target.X, this.target.Y));
-            if (!success)
+            this.farmer.toolPower.Value = 0;
+            WaterAction action = this.activeAction!;
+            this.activeAction = null;
+
+            if (action.Action == WaterAction.Kind.Refill)
             {
-                if (!refilling && this.tooTired())
+                if (!this.effectApplied || this.can!.WaterLeft < this.can.waterCanMax)
                 {
-                    this.exhausted();
+                    if (++this.refillFailures >= 2)
+                        throw new InvalidOperationException($"Refilling failed twice at {action.Origin}.");
+                    this.release(action);
                     return;
                 }
-                int count = this.attempts.GetValueOrDefault(this.target) + 1;
-                this.attempts[this.target] = count;
-                if (count >= 2)
-                    throw new InvalidOperationException($"Tool use failed twice at {this.target}.");
-                // Revalidate before retrying. No snapshot is marked complete on a failed action.
-                if (!refilling && !Map.tileNeedsWatering(this.target.X, this.target.Y))
-                {
-                    this.state = State.Ready;
-                    return;
-                }
-                this.beginTool(this.target);
-                return;
-            }
-            if (!refilling)
-                this.map.map[this.target.Y][this.target.X].waterable = false;
-            else
-            {
-                this.refillStation = null;
+                this.refillFailures = 0;
+                this.refillAction = null;
                 if (this.finishingRefill)
                 {
                     this.finish();
                     return;
                 }
                 if (WaterBot.config.RedoPathOnRefill) this.plan();
+                this.state = State.Ready;
+                return;
             }
+
+            if (!this.effectApplied && !this.profile.CanAfford(this.farmer.Stamina, action.Power))
+            {
+                // Stamina dropped during the animation: re-plan at a lower level, or stop.
+                if (!this.profile.CanAfford(this.farmer.Stamina, 0)) this.exhausted();
+                else
+                {
+                    this.plan();
+                    this.state = State.Ready;
+                }
+                return;
+            }
+
+            var dry = new List<Point>();
+            foreach (Point target in action.Targets)
+            {
+                if (this.needsWater(target)) dry.Add(target);
+                else this.map.map[target.Y][target.X].waterable = false;
+            }
+            this.currentAction++;
             this.state = State.Ready;
+            if (dry.Count == 0) return;
+
+            // Some crops are still dry: count the failure, skip crops that failed twice, and re-plan the rest.
+            foreach (Point target in dry)
+            {
+                int count = this.attempts.GetValueOrDefault(target) + 1;
+                this.attempts[target] = count;
+                if (count >= 2)
+                {
+                    this.skipped.Add(target);
+                    this.console?.Invoke($"Crop {target} is still dry after two attempts. Skipping it.");
+                }
+            }
+            this.plan();
         }
 
         private void releaseToolEffect()
@@ -309,6 +435,7 @@ namespace WaterBot.Framework
         public void cancel()
         {
             this.runId++;
+            State previous = this.state;
             this.state = State.Idle;
             if (this.farmer != null)
             {
@@ -317,25 +444,26 @@ namespace WaterBot.Framework
                     this.farmer.controller = null;
                     this.farmer.Halt();
                 }
-                if (this.toolEffect != null && this.farmer.toolOverrideFunction == this.toolEffect)
+                bool ownsTool = this.toolEffect != null && this.farmer.toolOverrideFunction == this.toolEffect;
+                if (ownsTool || previous == State.Charging)
                 {
-                    this.farmer.FarmerSprite.CurrentAnimation = null;
+                    if (previous == State.UsingTool) this.farmer.FarmerSprite.CurrentAnimation = null;
                     this.farmer.lastClick = Vector2.Zero;
+                    this.farmer.toolPower.Value = 0;
                     this.farmer.stopJittering();
                     Farmer.canMoveNow(this.farmer);
                 }
             }
             this.releaseToolEffect();
             this.movement = null;
-            this.refillStation = null;
+            this.refillAction = null;
+            this.activeAction = null;
             this.finishingRefill = false;
         }
 
-        private bool tooTired() => this.farmer!.Stamina <= MinStamina;
-
         private void exhausted()
         {
-            this.console?.Invoke($"Stamina is {this.farmer?.Stamina}; stopping before another action.");
+            this.console?.Invoke($"Stamina is {this.farmer?.Stamina}; stopping before another watering.");
             this.cancel();
             this.message("process.exhausted", 3);
         }

@@ -61,6 +61,7 @@ namespace WaterBot
                 {
                     Logger.Log("Player provided trigger to begin bot.");
                     this.Helper.Input.Suppress(e.Button);
+                    this.verifyPatterns();
                     this.bot?.start(this.console);
                 }
             }
@@ -103,6 +104,37 @@ namespace WaterBot
             return false;
         }
 
+        private bool patternsChecked;
+
+        /// <summary>
+        /// Once per session, compare the bot's charged-watering patterns with the game's own
+        /// Tool.tilesAffected. If they differ (e.g. after a game update), charged watering is
+        /// disabled and the bot falls back to single tiles.
+        /// </summary>
+        private void verifyPatterns()
+        {
+            if (this.patternsChecked || Game1.player?.CurrentTool is not WateringCan can) return;
+            this.patternsChecked = true;
+            try
+            {
+                var method = this.Helper.Reflection.GetMethod(can, "tilesAffected");
+                string? difference = CanProfile.VerifyPatterns(
+                    (origin, power) => (method.Invoke<List<Vector2>>(new Vector2(origin.X, origin.Y), power, Game1.player) ?? new List<Vector2>())
+                        .Select(v => new Point((int)Math.Round(v.X), (int)Math.Round(v.Y))),
+                    Game1.player.FacingDirection);
+                if (difference != null)
+                {
+                    CanProfile.PatternsVerified = false;
+                    Logger.Log($"Watering patterns differ from the game ({difference}). Charged watering is disabled.", LogLevel.Warn);
+                }
+            }
+            catch (Exception ex)
+            {
+                CanProfile.PatternsVerified = false;
+                Logger.Log($"Could not check watering patterns ({ex.Message}). Charged watering is disabled.", LogLevel.Warn);
+            }
+        }
+
         /// <summary>
         /// Debug messages
         /// </summary>
@@ -120,6 +152,15 @@ namespace WaterBot
             public bool RefillOnFinish { get; set; } = false;
             public int RefillIfLower { get; set; } = 95;
             public bool RedoPathOnRefill { get; set; } = false;
+
+            /// <summary>Use upgraded cans' charged patterns (lines and squares) where they save stamina.</summary>
+            public bool UseChargedWatering { get; set; } = true;
+
+            /// <summary>Skip the hold time when charging (otherwise 600 ms per level, like a player).</summary>
+            public bool InstantCharge { get; set; } = false;
+
+            /// <summary>"Stamina" (least stamina per crop) or "Speed" (least time per crop).</summary>
+            public string Optimize { get; set; } = "Stamina";
         }
 
         private void SetUpConfigMenu()
@@ -159,6 +200,29 @@ namespace WaterBot
                 tooltip: () => this.Helper.Translation.Get("config.redo_path_on_refill.desc"),
                 getValue: () => config.RedoPathOnRefill,
                 setValue: (bool b) => config.RedoPathOnRefill = b
+            );
+            configMenu.AddBoolOption(
+                mod: ModManifest,
+                name: () => this.Helper.Translation.Get("config.use_charged_watering.name"),
+                tooltip: () => this.Helper.Translation.Get("config.use_charged_watering.desc"),
+                getValue: () => config.UseChargedWatering,
+                setValue: (bool b) => config.UseChargedWatering = b
+            );
+            configMenu.AddBoolOption(
+                mod: ModManifest,
+                name: () => this.Helper.Translation.Get("config.instant_charge.name"),
+                tooltip: () => this.Helper.Translation.Get("config.instant_charge.desc"),
+                getValue: () => config.InstantCharge,
+                setValue: (bool b) => config.InstantCharge = b
+            );
+            configMenu.AddTextOption(
+                mod: ModManifest,
+                name: () => this.Helper.Translation.Get("config.optimize.name"),
+                tooltip: () => this.Helper.Translation.Get("config.optimize.desc"),
+                getValue: () => config.Optimize,
+                setValue: (string v) => config.Optimize = v,
+                allowedValues: new[] { "Stamina", "Speed" },
+                formatAllowedValue: (string v) => this.Helper.Translation.Get($"config.optimize.{v.ToLowerInvariant()}")
             );
         }
     }

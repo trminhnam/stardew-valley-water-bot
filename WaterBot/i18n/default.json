@@ -10,6 +10,14 @@
   "config.refill_if_lower.desc": "On refill after completion, it only refills if remaining percentage is less",
   "config.redo_path_on_refill.name": "Redo path on refill",
   "config.redo_path_on_refill.desc": "When refilling the pathfinding is calculated again",
+  "config.use_charged_watering.name": "Use charged watering",
+  "config.use_charged_watering.desc": "With an upgraded can, water lines and squares of crops in one go where it saves stamina. Off: one tile at a time.",
+  "config.instant_charge.name": "Instant charge",
+  "config.instant_charge.desc": "Skip the hold time when charging the can. Off: charges at the same speed as holding the button.",
+  "config.optimize.name": "Optimize for",
+  "config.optimize.desc": "Stamina: least stamina per crop. Speed: least time per crop (bigger patterns, more stamina).",
+  "config.optimize.stamina": "Stamina",
+  "config.optimize.speed": "Speed",
   "process.failed": "Watering stopped: could not complete the next action. See SMAPI log.",
   "process.remaining": "Finished watering accessible crops; {{count}} crops still need water."
 }

@@ -7,7 +7,7 @@ namespace WaterBot.Framework
     public delegate void console(string message);
 
     /// <summary>
-    /// Contains map data and the planning of watering stops and refills.
+    /// Contains map data, walking distances and refill search. Planning lives in Planner.
     /// </summary>
     class Map
     {
@@ -131,7 +131,9 @@ namespace WaterBot.Framework
 
         public bool inBounds(Point point) => point.X >= 0 && point.Y >= 0 && point.X < this.width && point.Y < this.height;
 
-        private int index(Point point) => point.Y * this.width + point.X;
+        public int index(Point point) => point.Y * this.width + point.X;
+
+        public Tile at(Point point) => this.map[point.Y][point.X];
 
         /// <summary>Whether the farmer can stand on this tile and walk to it from where the run started.</summary>
         public bool isReachable(Point point) => this.inBounds(point)
@@ -141,7 +143,7 @@ namespace WaterBot.Framework
         /// Breadth-first search over walkable tiles. Every step costs the same, so this gives
         /// the exact walking distance (in tiles) from start to every tile; -1 where unreachable.
         /// </summary>
-        private int[] walkingDistances(Point start)
+        public int[] walkingDistances(Point start)
         {
             int[] distance = new int[this.width * this.height];
             Array.Fill(distance, -1);
@@ -168,7 +170,7 @@ namespace WaterBot.Framework
         }
 
         /// <summary>Reachable tiles the farmer can water the target from: the tile itself and its 8 neighbors.</summary>
-        private IEnumerable<Tile> standingPlaces(Tile target)
+        public IEnumerable<Tile> standingPlaces(Tile target)
         {
             if (this.isReachable(target.getPoint())) yield return target;
             foreach (var (dy, dx) in this.directions.Concat(this.diagonals))
@@ -178,67 +180,11 @@ namespace WaterBot.Framework
             }
         }
 
-        private static bool inRange(Tile a, Tile b) => Math.Abs(a.x - b.x) <= 1 && Math.Abs(a.y - b.y) <= 1;
-
-        /// <summary>
-        /// Plans the whole run in walking order: from the current position, go to the nearest
-        /// crop (by real walking distance), stand where the most remaining crops are in reach,
-        /// queue each of those crops once, and repeat from that standing tile.
-        /// Crops with no reachable standing tile are logged and left out.
-        /// </summary>
-        public List<ActionableTile> planStops(console console)
-        {
-            HashSet<Tile> pending = this.waterableTiles.Where(t => t.waterable).ToHashSet();
-            List<ActionableTile> stops = new();
-            Point position = Game1.player.TilePoint;
-
-            foreach (Tile tile in pending.Where(t => !this.standingPlaces(t).Any()).ToList())
-            {
-                console($"No reachable standing position for crop {tile.getPoint()}. Skipping it.");
-                pending.Remove(tile);
-            }
-
-            while (pending.Count > 0)
-            {
-                int[] distance = this.walkingDistances(position);
-
-                // Nearest crop, measured to its closest standing tile.
-                Tile? target = null;
-                int best = int.MaxValue;
-                foreach (Tile tile in pending)
-                {
-                    foreach (Tile stand in this.standingPlaces(tile))
-                    {
-                        int d = distance[this.index(stand.getPoint())];
-                        if (d >= 0 && d < best)
-                        {
-                            best = d;
-                            target = tile;
-                        }
-                    }
-                }
-                if (target == null) break; // Cannot happen: every pending crop has a reachable stand.
-
-                // For that crop, prefer the standing tile that reaches the most remaining crops.
-                Tile chosen = this.standingPlaces(target)
-                    .OrderByDescending(stand => pending.Count(t => inRange(t, stand)))
-                    .ThenBy(stand => distance[this.index(stand.getPoint())])
-                    .First();
-
-                List<Tile> covered = pending.Where(t => inRange(t, chosen)).ToList();
-                stops.Add(new ActionableTile(chosen.getPoint(), covered.Select(t => t.getPoint()).ToList(), ActionableTile.Action.Water));
-                foreach (Tile tile in covered) pending.Remove(tile);
-                position = chosen.getPoint();
-            }
-
-            return stops;
-        }
-
         /// <summary>
         /// Finds the nearest refill spot by walking distance. Water tiles are usually blocked,
         /// so the farmer stands on the walkable tile next to the water.
         /// </summary>
-        public ActionableTile? getClosestRefill(Tile start, console console)
+        public WaterAction? getClosestRefill(Tile start, console console)
         {
             bool[] seen = new bool[this.width * this.height];
             Queue<(Tile Current, Tile? Last)> queue = new();
@@ -251,9 +197,8 @@ namespace WaterBot.Framework
 
                 if (current.water)
                 {
-                    List<Point> actions = new() { current.getPoint() };
                     Point stand = current.block ? (last ?? start).getPoint() : current.getPoint();
-                    return new ActionableTile(stand, actions, ActionableTile.Action.Refill);
+                    return WaterAction.Refill(stand, current.getPoint());
                 }
 
                 if (current.block && current != start)

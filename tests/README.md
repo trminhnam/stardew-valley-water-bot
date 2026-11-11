@@ -10,6 +10,8 @@ This executable links the production planner/controller source and uses small ga
 
 The scenarios cover duplicate diagonal targets, live soil checks, explicit targeting, stale run callbacks, trellis standing positions, unreachable crops, map edges, movement/animation failures, lifecycle cancellation, stamina limits, and both refill settings. Planner checks cover watering two rows from the path between them, ordering stops by walking distance around a wall, and planning a 480-crop farm in under 2 seconds (it takes about 0.1 s). An exhaustive sweep also checks all 512 patterns of a 3×3 crop patch, mixing trellises and walkable crops.
 
+Upgraded-can checks: the mod's charged patterns are compared with a transcription of the game's `Tool.tilesAffected`; a 3×12 bed at every can level (expected at most 36/12/9/4/2 uses and 72/48/48/32/20 stamina); a gold can choosing the 1×5 line on a single row; trellis rows from the end; watering over a fence; fenced plots where the farmer must stand on crops; stamina rounding; lowering the charge level as stamina runs out; refilling before a charged use; the Efficient and Reaching enchantments; realistic vs instant charging; stopping or being interrupted while charging; never starting a pattern on water; the on/off and Speed settings; and planning 480 crops with an iridium can.
+
 These checks do not exercise the real game's collision, input, animation, or multiplayer engines. Separately build the production project against installed game and SMAPI assemblies to catch API compatibility errors.
 
 ## In-game verification
@@ -23,3 +25,4 @@ These checks do not exercise the real game's collision, input, animation, or mul
 7. Test low stamina, no reachable refill source, and a bottomless can. Confirm the appropriate exit message and that player movement is restored.
 8. Trigger on growing/regrowing crops, then on harvest-ready crops. Growing crops should start the bot; harvest-ready crops should retain the normal harvest interaction.
 9. In multiplayer, have another farmer water a queued crop. The bot should skip that target if it is already watered when its tool effect runs.
+10. Upgraded cans: see the per-can checklist in [docs/upgraded-cans.md](../docs/upgraded-cans.md).

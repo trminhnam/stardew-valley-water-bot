@@ -1,5 +1,7 @@
 # WaterBot fixes: changes, build and test notes
 
+Upgraded watering cans are covered in [upgraded-cans.md](upgraded-cans.md); the confirmed game rules are in [game-mechanics.md](game-mechanics.md).
+
 Status as of 2026-11-11: the code changes are complete. The regression harness (21 scenarios) passes on .NET 8.0.428. **The mod has not been compiled against the real game and SMAPI, and it has not been tested in the game.** The machine used for development had no SMAPI installed.
 
 ## Reported problems
@@ -161,7 +163,7 @@ Watch the SMAPI console during testing. Every early stop logs its reason as an e
 
 ## Known open issues
 
-1. **One failure stops the whole run.** A missing path, a 3-second stall or a crop failing twice cancels everything. It would be friendlier to skip that stop, carry on, and include it in the "still need water" count. Only problems affecting the whole run (player, location or tool changed) should cancel it.
+1. ~~**One failure stops the whole run.**~~ Fixed on `feature/upgraded-cans`: a crop that stays dry is retried once, then skipped and reported, and the run carries on. Missing paths and stalls still stop the run.
 2. **Pets and animals can end a run.** The standing tile is checked for collisions right before moving. A pet or farm animal on that tile, or blocking the path for 3 seconds, ends the run (if the game treats them as obstacles; not confirmed).
 3. **The splash can still look misaimed.** The bot still faces up or down for diagonal crops, and faces right when watering its own tile. The correct soil gets wet, but the animation points elsewhere.
 4. **Starting is stricter.** Clicking an already-watered crop does nothing and shows no message.
